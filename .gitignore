@@ -1,0 +1,8 @@
+/build/
+/data/
+/node_modules/
+*.log
+/research/*.js
+/research/tests.jsonl
+/research/*console.txt
+/research/*.json
