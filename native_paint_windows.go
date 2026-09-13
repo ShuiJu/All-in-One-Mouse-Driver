@@ -11,6 +11,21 @@ func rgb(v int) uintptr                     { return uintptr((v&255)<<16 | v&0xf
 func (u *nativeUI) x(v int) int32           { return int32(v * u.width / 1280) }
 func (u *nativeUI) y(v int) int32           { return int32(v * u.height / 800) }
 func (u *nativeUI) box(x, y, w, h int) rect { return rect{u.x(x), u.y(y), u.x(x + w), u.y(y + h)} }
+func (u *nativeUI) titleStatus() string {
+	name := "默认配置"
+	if p, ok := u.config.Find(u.config.Active); ok {
+		name = p.Name
+	}
+	if !u.config.AutoEnabled {
+		return name + " · 自动切换已暂停"
+	}
+	if d := u.selectedDevice(); d != nil && d.Profile != "" {
+		if p, ok := u.config.Find(d.Profile); ok {
+			return p.Name + " · " + u.displayName(*d)
+		}
+	}
+	return name
+}
 func (u *nativeUI) font(size int) uintptr {
 	pixels := int(math.Round(float64(size) * math.Min(float64(u.width)/1280, float64(u.height)/800)))
 	if pixels < 10 {
@@ -132,7 +147,7 @@ func (u *nativeUI) paint(hwnd uintptr) {
 	bitmap, _, _ := gdi.NewProc("CreateCompatibleBitmap").Call(dc, uintptr(u.width), uintptr(u.height))
 	old, _, _ := gdi.NewProc("SelectObject").Call(mem, bitmap)
 	fill(mem, rect{0, 0, int32(u.width), int32(u.height)}, 0x101214)
-	u.text(mem, "MOUSE HUB", 530, 22, 220, 25, 19, 0xc9d3e5, 1)
+	u.text(mem, u.titleStatus(), 320, 22, 640, 25, 16, 0xc9d3e5, 1)
 
 	conflict := []string{}
 	for _, b := range []string{"lamzu", "vaxee"} {

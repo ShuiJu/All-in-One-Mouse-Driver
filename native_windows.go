@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"mousehub/internal/hub"
-	"reflect"
 	"sync"
 	"syscall"
 	"unicode/utf16"
@@ -52,15 +51,15 @@ type drawItem struct {
 	Data                            uintptr
 }
 type nativeButton struct {
-	kind, profileID, process string
-	area                     rect
-	x, y, w, h               int
-	label                    string
-	selected                 bool
-	accent                   bool
-	enabled                  bool
-	action                   func()
-	hwnd                     uintptr
+	kind, profileID, process, deviceID string
+	area                               rect
+	x, y, w, h                         int
+	label                              string
+	selected                           bool
+	accent                             bool
+	enabled                            bool
+	action                             func()
+	hwnd                               uintptr
 }
 type nativeUI struct {
 	editingProfile                                             string
@@ -75,7 +74,7 @@ type nativeUI struct {
 	engine                                                     *hub.Engine
 	state                                                      hub.State
 	config                                                     hub.Config
-	data, view, brand, scene, selected, note                   string
+	data, view, brand, selected, note                          string
 	dirty, busy, visible, rebuilding                           bool
 	width, height                                              int
 	fonts                                                      map[int]uintptr
@@ -91,7 +90,7 @@ type nativeUI struct {
 }
 
 func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
-	u := &nativeUI{engine: e, data: data, view: "home", brand: "lamzu", scene: "default", width: 1280, height: 800, fonts: map[int]uintptr{}, buttons: map[int]*nativeButton{}, edits: map[string]uintptr{}, results: make(chan func(), 8)}
+	u := &nativeUI{engine: e, data: data, view: "home", brand: "lamzu", width: 1280, height: 800, fonts: map[int]uintptr{}, buttons: map[int]*nativeButton{}, edits: map[string]uintptr{}, results: make(chan func(), 8)}
 	u.state = e.Snapshot()
 	u.config = hub.Clone(u.state.Config)
 	u.editingProfile = u.config.Active
@@ -103,7 +102,8 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	u.instance, _, _ = kernel32.NewProc("GetModuleHandleW").Call(0)
 	u.callback = syscall.NewCallback(nativeWndProc)
 	cursor, _, _ := user32.NewProc("LoadCursorW").Call(0, 32512)
-	wc := winClass{Proc: u.callback, Instance: u.instance, Cursor: cursor, Name: utf(windowClassName())}
+	bgBrush, _, _ := gdi.NewProc("CreateSolidBrush").Call(rgb(0x101214))
+	wc := winClass{Proc: u.callback, Instance: u.instance, Cursor: cursor, Background: bgBrush, Name: utf(windowClassName())}
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	wc.Icon, _, _ = user32.NewProc("LoadIconW").Call(0, 32512)
 	r, _, err := user32.NewProc("RegisterClassExW").Call(uintptr(unsafe.Pointer(&wc)))
@@ -119,6 +119,7 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	if int(screenH) < height+80 {
 		height = int(screenH) - 80
 	}
+	// WS_CLIPCHILDREN: parent paint must not erase over child controls.
 	u.hwnd, _, err = winCreate.Call(0, uintptr(unsafe.Pointer(wc.Name)), uintptr(unsafe.Pointer(utf(windowTitle()))), 0x02CF0000, uintptr((int(screenW)-width)/2), uintptr((int(screenH)-height)/2), uintptr(width), uintptr(height), 0, 0, u.instance, 0)
 	if u.hwnd == 0 {
 		return nil, fmt.Errorf("create window: %v", err)
@@ -163,6 +164,13 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 		switch msg {
 		case 0x0014:
 			return 1
+		case 0x0133, 0x0135, 0x0136, 0x0138:
+			// EDIT / BUTTON / STATIC / LISTBOX: dark face instead of COLOR_BTNFACE white flash.
+			gdi.NewProc("SetTextColor").Call(wp, rgb(0xe7edf8))
+			gdi.NewProc("SetBkColor").Call(wp, rgb(0x17191d))
+			brush, _, _ := gdi.NewProc("GetStockObject").Call(18)
+			gdi.NewProc("SetDCBrushColor").Call(wp, rgb(0x17191d))
+			return brush
 		case 0x000F:
 			u.paint(hwnd)
 			return 0
@@ -221,12 +229,6 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 		case 0x002B:
 			u.drawButton((*drawItem)(unsafe.Pointer(lp)))
 			return 1
-		case 0x0133, 0x0138:
-			gdi.NewProc("SetTextColor").Call(wp, rgb(0xe7edf8))
-			gdi.NewProc("SetBkColor").Call(wp, rgb(0x17191d))
-			brush, _, _ := gdi.NewProc("GetStockObject").Call(18)
-			gdi.NewProc("SetDCBrushColor").Call(wp, rgb(0x17191d))
-			return brush
 		case 0x0010:
 			u.hide()
 			return 0
@@ -260,16 +262,25 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 				if err := u.collect(); err != nil {
 					u.dirty = true
 				}
+				// Engine finished a scan/step; drop the transient refresh status.
+				if u.note == "正在检测…" {
+					u.note = ""
+				}
 				next := u.engine.Snapshot()
-				changed := !reflect.DeepEqual(next.Devices, u.state.Devices)
-				configChanged := !reflect.DeepEqual(next.Config, u.state.Config) && !u.dirty
+				structural := deviceTopologyChanged(u.state.Devices, next.Devices) ||
+					len(u.config.Profiles) != len(next.Config.Profiles) ||
+					len(u.config.Bindings) != len(next.Config.Bindings)
 				u.state = next
 				if !u.dirty {
 					u.config = hub.Clone(next.Config)
 				}
-				if (changed && u.view == "home") || configChanged {
+				// Auto-switch only mutates device status/applied profile; avoid tearing down controls.
+				if structural && u.view == "home" {
 					u.layout()
 				} else {
+					if u.view == "home" {
+						u.refreshDeviceTabs()
+					}
 					u.invalidate()
 				}
 			}
@@ -320,6 +331,41 @@ func (u *nativeUI) run(hidden bool) {
 	}
 }
 func (u *nativeUI) notify() { winPost.Call(u.hwnd, appUpdate, 0, 0) }
+func deviceTopologyChanged(old, next []hub.Device) bool {
+	if len(old) != len(next) {
+		return true
+	}
+	for i := range old {
+		if old[i].ID != next[i].ID || old[i].Name != next[i].Name {
+			return true
+		}
+	}
+	return false
+}
+func (u *nativeUI) refreshDeviceTabs() {
+	for _, b := range u.buttons {
+		if b.deviceID == "" {
+			continue
+		}
+		for _, d := range u.state.Devices {
+			if d.ID != b.deviceID {
+				continue
+			}
+			label := u.displayName(d)
+			if d.Battery != nil {
+				label += fmt.Sprintf("  %d%%", *d.Battery)
+			}
+			if b.label != label {
+				b.label = label
+				if b.hwnd != 0 {
+					winSend.Call(b.hwnd, 0x000C, 0, uintptr(unsafe.Pointer(utf(label))))
+				}
+			}
+			b.selected = u.selected == d.ID
+			break
+		}
+	}
+}
 func (u *nativeUI) invalidate() {
 	if u.visible {
 		user32.NewProc("InvalidateRect").Call(u.hwnd, 0, 0)

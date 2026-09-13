@@ -61,6 +61,8 @@ func (u *nativeUI) displayName(d hub.Device) string {
 }
 func (u *nativeUI) control(class, text string, style uintptr, x, y, w, h, id int) uintptr {
 	r := u.box(x, y, w, h)
+	// Create hidden: visible owner-draw controls flash the default light face before WM_DRAWITEM.
+	style &^= 0x10000000
 	hw, _, _ := winCreate.Call(0, uintptr(unsafe.Pointer(utf(class))), uintptr(unsafe.Pointer(utf(text))), style, uintptr(r.L), uintptr(r.T), uintptr(r.R-r.L), uintptr(r.B-r.T), u.hwnd, uintptr(id), u.instance, 0)
 	if hw != 0 {
 		u.children = append(u.children, hw)
@@ -82,6 +84,11 @@ func (u *nativeUI) button(label string, x, y, w, h int, selected, accent, enable
 	}
 	u.buttons[id] = b
 	b.hwnd = u.control("BUTTON", label, 0x5001000B, x, y, w, h, id)
+	if b.hwnd != 0 {
+		// Always subclass: non-interactive buttons still erase to COLOR_BTNFACE otherwise.
+		old, _, _ := user32.NewProc("SetWindowLongPtrW").Call(b.hwnd, ^uintptr(3), u.buttonCallback)
+		u.buttonOld[b.hwnd] = old
+	}
 	// Clip the actual child window, so corners reveal the parent's real surface.
 	radius := int(u.y(24))
 	region, _, _ := gdi.NewProc("CreateRoundRectRgn").Call(0, 0, uintptr(b.area.R-b.area.L+1), uintptr(b.area.B-b.area.T+1), uintptr(radius), uintptr(radius))
@@ -97,10 +104,9 @@ func (u *nativeUI) button(label string, x, y, w, h int, selected, accent, enable
 	return b
 }
 func (u *nativeUI) interactive(b *nativeButton, kind string) {
+	// Subclass is already installed in button(); re-setting it would make
+	// buttonOld point at our own proc and recurse on WM_SHOWWINDOW.
 	b.kind = kind
-	index := int32(-4)
-	old, _, _ := user32.NewProc("SetWindowLongPtrW").Call(b.hwnd, uintptr(index), u.buttonCallback)
-	u.buttonOld[b.hwnd] = old
 }
 func (u *nativeUI) edit(key, value string, x, y, w, h int, multi bool) {
 	style := uintptr(0x50810080)
@@ -186,9 +192,7 @@ func (u *nativeUI) layout() {
 	}
 	u.button("⌂  主页", 26, 20, 114, 47, u.view == "home", false, true, func() { u.navigate("home") })
 	u.button("◇  我的配置", 148, 20, 230, 47, u.view == "profiles", false, true, func() { u.navigate("profiles") })
-	u.button("设置", 987, 20, 82, 47, u.view == "settings", false, true, func() { u.navigate("settings") })
-	u.button("—", 1081, 20, 66, 47, false, false, true, func() { winShow.Call(u.hwnd, 6) })
-	u.button("收起", 1158, 20, 96, 47, false, false, true, u.hide)
+	u.button("设置", 1158, 20, 96, 47, u.view == "settings", false, true, func() { u.navigate("settings") })
 	devicePage := u.view == "performance" || u.view == "parameters" || u.view == "overview"
 	if devicePage {
 		names := []string{}
@@ -226,7 +230,8 @@ func (u *nativeUI) layout() {
 			if d.Battery != nil {
 				label += fmt.Sprintf("  %d%%", *d.Battery)
 			}
-			u.button(label, 260+i*245, 665, 235, 50, u.selected == d.ID, false, true, func() { u.selected = device.ID; u.brand = device.Brand; u.layout() })
+			b := u.button(label, 260+i*245, 665, 235, 50, u.selected == d.ID, false, true, func() { u.selected = device.ID; u.brand = device.Brand; u.layout() })
+			b.deviceID = d.ID
 		}
 		u.button("刷新设备", 31, 665, 160, 45, false, false, true, func() { u.engine.DevicesChanged(); u.note = "正在检测…"; u.invalidate() })
 	case "performance":
@@ -282,7 +287,19 @@ func (u *nativeUI) layout() {
 		u.button("保存名称", 970, 350, 220, 45, false, true, true, u.save)
 		u.button("刷新设备信息", 905, 593, 310, 50, false, false, true, func() { u.engine.DevicesChanged(); u.invalidate() })
 	}
-	user32.NewProc("RedrawWindow").Call(u.hwnd, 0, 0, 0x185)
+	u.finishLayout()
+}
+// Paint the dark parent first, then reveal already-customized children.
+// Avoid RDW_ERASE on children — it paints the default light button face.
+func (u *nativeUI) finishLayout() {
+	user32.NewProc("RedrawWindow").Call(u.hwnd, 0, 0, 0x0081)
+	for _, h := range u.children {
+		winShow.Call(h, 5)
+		if b := u.buttonAtWindow(h); b != nil && !b.enabled {
+			user32.NewProc("EnableWindow").Call(h, 0)
+		}
+	}
+	user32.NewProc("RedrawWindow").Call(u.hwnd, 0, 0, 0x0101)
 }
 func (u *nativeUI) layoutProfiles() {
 	label := "自动切换：已开启"
@@ -361,6 +378,7 @@ func (u *nativeUI) layoutProfiles() {
 	}
 	u.button("导入配置", 851, 739, 175, 45, false, false, true, u.importConfig)
 	u.button("导出配置", 1040, 739, 175, 45, false, false, true, u.exportConfig)
+	u.finishLayout()
 }
 func (u *nativeUI) newProfile() {
 	p := *u.profile()
@@ -407,7 +425,21 @@ func (u *nativeUI) addProgram() {
 }
 func (u *nativeUI) save() {
 	c := hub.Clone(u.config)
-	u.work(func() error { return u.engine.Update(c) }, "已保存")
+	deviceID, profileID := u.selected, u.editingProfile
+	applyManual := !c.AutoEnabled && deviceID != ""
+	note := "已保存"
+	if applyManual {
+		note = "已保存并应用到当前设备"
+	}
+	u.work(func() error {
+		if err := u.engine.Update(c); err != nil {
+			return err
+		}
+		if !applyManual {
+			return nil
+		}
+		return u.engine.ApplyManual(deviceID, profileID)
+	}, note)
 }
 func (u *nativeUI) saveButtons() {
 	u.button("保存配置", 1035, 684, 214, 48, false, true, true, u.save)

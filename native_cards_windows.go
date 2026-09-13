@@ -41,6 +41,10 @@ func nativeButtonProc(hwnd, msg, wp, lp uintptr) uintptr {
 	if msg == 0x82 {
 		delete(u.buttonOld, hwnd)
 	}
+	// Suppress the default light erase that flashes before owner-draw paints.
+	if msg == 0x0014 {
+		return 1
+	}
 	if b != nil && !u.busy {
 		p := point{b.area.L + int32(int16(lp&0xffff)), b.area.T + int32(int16((lp>>16)&0xffff))}
 		switch msg {
@@ -106,7 +110,7 @@ func nativeButtonProc(hwnd, msg, wp, lp uintptr) uintptr {
 			}
 		}
 	}
-	if old != 0 {
+	if old != 0 && old != u.buttonCallback {
 		r, _, _ := user32.NewProc("CallWindowProcW").Call(old, hwnd, msg, wp, lp)
 		return r
 	}

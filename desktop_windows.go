@@ -24,6 +24,8 @@ func singleInstance() bool {
 	if qaMode {
 		mutex += ".QA"
 	}
+	// CreateMutexW does not clear last-error on first creation; stale ERROR_ALREADY_EXISTS would falsely claim a peer.
+	kernel32.NewProc("SetLastError").Call(0)
 	h, _, err := kernel32.NewProc("CreateMutexW").Call(0, 0, uintptr(unsafe.Pointer(utf(mutex))))
 	if h == 0 {
 		message("无法创建应用实例：" + err.Error())
@@ -34,9 +36,10 @@ func singleInstance() bool {
 		hwnd, _, _ := user32.NewProc("FindWindowW").Call(uintptr(unsafe.Pointer(utf(windowClassName()))), 0)
 		if hwnd != 0 {
 			user32.NewProc("PostMessageW").Call(hwnd, 0x8004, 0, 0)
+			syscall.CloseHandle(syscall.Handle(h))
+			return false
 		}
-		syscall.CloseHandle(syscall.Handle(h))
-		return false
+		// Mutex exists but no window: treat as abandoned peer and continue as the live instance.
 	}
 	return true
 }
