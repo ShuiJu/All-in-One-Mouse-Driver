@@ -205,7 +205,9 @@ func (u *nativeUI) paintHome(dc uintptr) {
 	}
 	u.text(dc, name, 325, 150, 620, 42, 28, 0xe9effa, 0)
 	u.text(dc, sub, 325, 203, 600, 32, 13, 0x919eb2, 0)
-	u.mouse(dc, 555, 250, 165, 310, u.brand == "vaxee")
+	if !u.drawMouseImage(dc, mouseAssetKey(d), 500, 230, 280, 340) {
+		u.mouse(dc, 555, 250, 165, 310, u.brand == "vaxee")
+	}
 	u.text(dc, "↗", 917, 568, 45, 34, 24, 0x9bb9ff, 1)
 }
 func (u *nativeUI) deviceHeading(dc uintptr) {

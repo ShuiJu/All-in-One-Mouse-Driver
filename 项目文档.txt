@@ -39,6 +39,7 @@ UI 反馈七条已落地：去掉无意义描述、按钮黑角、整卡可点�
   3) 窗口类注册深色背景刷，处理 WM_CTLCOLORBTN；
   4) RedrawWindow 不对子窗口 RDW_ERASE。
 - 注意：button() 统一子类化后，interactive() 只能改 kind，不能再次 SetWindowLongPtr，否则 old 指回自身，WM_SHOWWINDOW 会栈溢出。
+- 托盘/窗口图标与首页鼠标实拍图已接入：`assets/app.ico`、`assets/mice/*.png`。INCA 使用 `鼠标图片/INCA-2.png`，从四边泛洪去掉纯白背景后嵌入；VAXEE 两张本就透明底。按设备 PID/型号选择；加载失败回退手绘示意图。
 
 未覆盖：人工真实拔插、长期压力、多固件/多 Windows 环境。不能把本次结果扩展为所有情况绝无问题。
 

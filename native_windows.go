@@ -99,13 +99,17 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	nativeCurrent = u
 	// DPI scaling is handled in our logical 1280x800 layout.
 	user32.NewProc("SetProcessDPIAware").Call()
+	loadEmbeddedAssets()
 	u.instance, _, _ = kernel32.NewProc("GetModuleHandleW").Call(0)
 	u.callback = syscall.NewCallback(nativeWndProc)
 	cursor, _, _ := user32.NewProc("LoadCursorW").Call(0, 32512)
 	bgBrush, _, _ := gdi.NewProc("CreateSolidBrush").Call(rgb(0x101214))
 	wc := winClass{Proc: u.callback, Instance: u.instance, Cursor: cursor, Background: bgBrush, Name: utf(windowClassName())}
 	wc.Size = uint32(unsafe.Sizeof(wc))
-	wc.Icon, _, _ = user32.NewProc("LoadIconW").Call(0, 32512)
+	wc.Icon = logoIcon
+	if wc.Icon == 0 {
+		wc.Icon, _, _ = user32.NewProc("LoadIconW").Call(0, 32512)
+	}
 	r, _, err := user32.NewProc("RegisterClassExW").Call(uintptr(unsafe.Pointer(&wc)))
 	if r == 0 {
 		return nil, fmt.Errorf("register window: %v", err)
@@ -123,6 +127,10 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	u.hwnd, _, err = winCreate.Call(0, uintptr(unsafe.Pointer(wc.Name)), uintptr(unsafe.Pointer(utf(windowTitle()))), 0x02CF0000, uintptr((int(screenW)-width)/2), uintptr((int(screenH)-height)/2), uintptr(width), uintptr(height), 0, 0, u.instance, 0)
 	if u.hwnd == 0 {
 		return nil, fmt.Errorf("create window: %v", err)
+	}
+	if logoIcon != 0 {
+		winSend.Call(u.hwnd, 0x0080, 0, logoIcon) // WM_SETICON ICON_SMALL
+		winSend.Call(u.hwnd, 0x0080, 1, logoIcon) // WM_SETICON ICON_BIG
 	}
 	var area rect
 	user32.NewProc("GetClientRect").Call(u.hwnd, uintptr(unsafe.Pointer(&area)))
@@ -415,6 +423,7 @@ func (u *nativeUI) cleanup() {
 		for _, f := range u.fonts {
 			gdi.NewProc("DeleteObject").Call(f)
 		}
+		releaseEmbeddedAssets()
 		if instanceHandle != 0 {
 			syscall.CloseHandle(syscall.Handle(instanceHandle))
 		}
