@@ -12,6 +12,88 @@ var user32 = syscall.NewLazyDLL("user32.dll")
 var shell32 = syscall.NewLazyDLL("shell32.dll")
 var kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
+type rawInputDevice struct {
+	UsagePage uint16
+	Usage     uint16
+	Flags     uint32
+	Target    uintptr
+}
+
+const (
+	wmInput        = 0x00ff
+	rawInputSink   = 0x00000100
+	rawInputRemove = 0x00000001
+	rawMousePage   = 0x01
+	rawMouseUsage  = 0x02
+)
+
+// setRecoveryMouseInput subscribes to mouse activity only while the engine
+// has a pending device recovery. It does not send any HID command.
+func setRecoveryMouseInput(hwnd uintptr, enabled bool) error {
+	device := rawInputDevice{UsagePage: rawMousePage, Usage: rawMouseUsage}
+	if enabled {
+		device.Flags = rawInputSink
+		device.Target = hwnd
+	} else {
+		device.Flags = rawInputRemove
+	}
+	r, _, err := user32.NewProc("RegisterRawInputDevices").Call(
+		uintptr(unsafe.Pointer(&device)),
+		1,
+		unsafe.Sizeof(device),
+	)
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+type rawInputHeader struct {
+	Type   uint32
+	Size   uint32
+	Device uintptr
+	WParam uintptr
+}
+
+const (
+	ridInput       = 0x10000003
+	ridiDeviceName = 0x20000007
+)
+
+func rawInputDevicePath(raw uintptr) string {
+	if raw == 0 {
+		return ""
+	}
+	getData := user32.NewProc("GetRawInputData")
+	headerSize := uint32(unsafe.Sizeof(rawInputHeader{}))
+	size := uint32(0)
+	r, _, _ := getData.Call(raw, ridInput, 0, uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	if r == ^uintptr(0) || size < headerSize {
+		return ""
+	}
+	data := make([]byte, size)
+	r, _, _ = getData.Call(raw, ridInput, uintptr(unsafe.Pointer(&data[0])), uintptr(unsafe.Pointer(&size)), uintptr(headerSize))
+	if r == ^uintptr(0) {
+		return ""
+	}
+	header := (*rawInputHeader)(unsafe.Pointer(&data[0]))
+	if header.Device == 0 {
+		return ""
+	}
+	getInfo := user32.NewProc("GetRawInputDeviceInfoW")
+	nameSize := uint32(0)
+	r, _, _ = getInfo.Call(header.Device, ridiDeviceName, 0, uintptr(unsafe.Pointer(&nameSize)))
+	if r == ^uintptr(0) || nameSize == 0 {
+		return ""
+	}
+	name := make([]uint16, nameSize+1)
+	r, _, _ = getInfo.Call(header.Device, ridiDeviceName, uintptr(unsafe.Pointer(&name[0])), uintptr(unsafe.Pointer(&nameSize)))
+	if r == ^uintptr(0) {
+		return ""
+	}
+	return syscall.UTF16ToString(name)
+}
+
 func utf(s string) *uint16 { p, _ := syscall.UTF16PtrFromString(s); return p }
 func message(s string) {
 	user32.NewProc("MessageBoxW").Call(0, uintptr(unsafe.Pointer(utf(s))), uintptr(unsafe.Pointer(utf("Mouse Hub"))), 0x10)

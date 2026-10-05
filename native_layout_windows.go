@@ -33,6 +33,27 @@ func (u *nativeUI) selectedDevice() *hub.Device {
 	}
 	return nil
 }
+
+const devicesPerPage = 4
+
+func devicePageBounds(count, page int) (start, end, maxPage int) {
+	if count <= 0 {
+		return 0, 0, 0
+	}
+	maxPage = (count - 1) / devicesPerPage
+	if page < 0 {
+		page = 0
+	}
+	if page > maxPage {
+		page = maxPage
+	}
+	start = page * devicesPerPage
+	end = start + devicesPerPage
+	if end > count {
+		end = count
+	}
+	return start, end, maxPage
+}
 func (u *nativeUI) parameters() *hub.Parameters {
 	d := u.selectedDevice()
 	if d == nil {
@@ -221,19 +242,41 @@ func (u *nativeUI) layout() {
 		b := u.button("打开设备设置", 290, 122, 700, 505, false, false, u.selectedDevice() != nil, func() { u.navigate("performance") })
 		u.interactive(b, "device")
 		ds := u.state.Devices
-		for i, d := range ds {
-			if i >= 4 {
+		_, _, maxPage := devicePageBounds(len(ds), u.devicePage)
+		if u.devicePage < 0 {
+			u.devicePage = 0
+		}
+		if u.devicePage > maxPage {
+			u.devicePage = maxPage
+		}
+		start, end, _ := devicePageBounds(len(ds), u.devicePage)
+		selectedVisible := false
+		for i := start; i < end; i++ {
+			if ds[i].ID == u.selected {
+				selectedVisible = true
 				break
 			}
+		}
+		if !selectedVisible && start < end {
+			u.selected = ds[start].ID
+			u.brand = ds[start].Brand
+		}
+		for i := start; i < end; i++ {
+			d := ds[i]
 			device := d
 			label := u.displayName(d)
 			if d.Battery != nil {
 				label += fmt.Sprintf("  %d%%", *d.Battery)
 			}
-			b := u.button(label, 260+i*245, 665, 235, 50, u.selected == d.ID, false, true, func() { u.selected = device.ID; u.brand = device.Brand; u.layout() })
+			slot := i - start
+			b := u.button(label, 260+slot*245, 665, 235, 50, u.selected == d.ID, false, true, func() { u.selected = device.ID; u.brand = device.Brand; u.layout() })
 			b.deviceID = d.ID
 		}
 		u.button("刷新设备", 31, 665, 160, 45, false, false, true, func() { u.engine.DevicesChanged(); u.note = "正在检测…"; u.invalidate() })
+		if maxPage > 0 {
+			u.button("‹", 200, 665, 42, 45, false, false, u.devicePage > 0, func() { u.devicePage--; u.layout() })
+			u.button("›", 1234, 665, 42, 45, false, false, u.devicePage < maxPage, func() { u.devicePage++; u.layout() })
+		}
 	case "performance":
 		modes := []struct{ id, name string }{{"office", "办公模式"}, {"speed", "高速模式"}, {"20000fps", "20,000 FPS"}}
 		if u.brand == "vaxee" {
@@ -289,6 +332,7 @@ func (u *nativeUI) layout() {
 	}
 	u.finishLayout()
 }
+
 // Paint the dark parent first, then reveal already-customized children.
 // Avoid RDW_ERASE on children — it paints the default light button face.
 func (u *nativeUI) finishLayout() {

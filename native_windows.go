@@ -62,31 +62,31 @@ type nativeButton struct {
 	hwnd                               uintptr
 }
 type nativeUI struct {
-	editingProfile                                             string
-	profilePage, programPage                                   int
-	buttonCallback                                             uintptr
-	buttonOld                                                  map[uintptr]uintptr
-	dragProfile, dropProcess                                   string
-	dragStart                                                  point
-	dragging                                                   bool
-	pendingBinding                                             hub.Binding
-	hwnd, instance, callback, hook, hookCallback, deviceNotify uintptr
-	engine                                                     *hub.Engine
-	state                                                      hub.State
-	config                                                     hub.Config
-	data, view, brand, selected, note                          string
-	dirty, busy, visible, rebuilding                           bool
-	width, height                                              int
-	fonts                                                      map[int]uintptr
-	buttons                                                    map[int]*nativeButton
-	selects                                                    map[int]func(int)
-	edits                                                      map[string]uintptr
-	children                                                   []uintptr
-	nextID                                                     int
-	tray                                                       notifyIcon
-	taskbarMessage                                             uint32
-	results                                                    chan func()
-	closeOnce                                                  sync.Once
+	editingProfile                                                         string
+	profilePage, programPage, devicePage                                   int
+	buttonCallback                                                         uintptr
+	buttonOld                                                              map[uintptr]uintptr
+	dragProfile, dropProcess                                               string
+	dragStart                                                              point
+	dragging                                                               bool
+	pendingBinding                                                         hub.Binding
+	hwnd, instance, callback, hook, hookCallback, deviceNotify             uintptr
+	engine                                                                 *hub.Engine
+	state                                                                  hub.State
+	config                                                                 hub.Config
+	data, view, brand, selected, note                                      string
+	dirty, busy, visible, rebuilding, recoveryInput, recoveryInputNotified bool
+	width, height                                                          int
+	fonts                                                                  map[int]uintptr
+	buttons                                                                map[int]*nativeButton
+	selects                                                                map[int]func(int)
+	edits                                                                  map[string]uintptr
+	children                                                               []uintptr
+	nextID                                                                 int
+	tray                                                                   notifyIcon
+	taskbarMessage                                                         uint32
+	results                                                                chan func()
+	closeOnce                                                              sync.Once
 }
 
 func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
@@ -123,8 +123,9 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	if int(screenH) < height+80 {
 		height = int(screenH) - 80
 	}
-	// WS_CLIPCHILDREN: parent paint must not erase over child controls.
-	u.hwnd, _, err = winCreate.Call(0, uintptr(unsafe.Pointer(wc.Name)), uintptr(unsafe.Pointer(utf(windowTitle()))), 0x02CF0000, uintptr((int(screenW)-width)/2), uintptr((int(screenH)-height)/2), uintptr(width), uintptr(height), 0, 0, u.instance, 0)
+	// Fixed-size window: caption, system menu and minimize only; no sizing frame
+	// or maximize box. WS_CLIPCHILDREN protects child controls during paint.
+	u.hwnd, _, err = winCreate.Call(0, uintptr(unsafe.Pointer(wc.Name)), uintptr(unsafe.Pointer(utf(windowTitle()))), 0x02CA0000, uintptr((int(screenW)-width)/2), uintptr((int(screenH)-height)/2), uintptr(width), uintptr(height), 0, 0, u.instance, 0)
 	if u.hwnd == 0 {
 		return nil, fmt.Errorf("create window: %v", err)
 	}
@@ -170,6 +171,11 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	u := nativeCurrent
 	if u != nil {
 		switch msg {
+		case wmInput:
+			if u.recoveryInput && !u.recoveryInputNotified {
+				u.recoveryInputNotified = u.engine.NotifyMouseActivity(rawInputDevicePath(lp))
+			}
+			return 0
 		case 0x0014:
 			return 1
 		case 0x0133, 0x0135, 0x0136, 0x0138:
@@ -266,6 +272,9 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 				}
 			}
 		drained:
+			next := u.engine.Snapshot()
+			u.syncRecoveryInput(u.engine.NeedsRecovery())
+			u.recoveryInputNotified = false
 			if u.visible {
 				if err := u.collect(); err != nil {
 					u.dirty = true
@@ -274,7 +283,6 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 				if u.note == "正在检测…" {
 					u.note = ""
 				}
-				next := u.engine.Snapshot()
 				structural := deviceTopologyChanged(u.state.Devices, next.Devices) ||
 					len(u.config.Profiles) != len(next.Config.Profiles) ||
 					len(u.config.Bindings) != len(next.Config.Bindings)
@@ -293,6 +301,7 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 				}
 			}
 			return 0
+
 		}
 		if uint32(msg) == u.taskbarMessage && u.taskbarMessage != 0 {
 			shell32.NewProc("Shell_NotifyIconW").Call(0, uintptr(unsafe.Pointer(&u.tray)))
@@ -339,6 +348,18 @@ func (u *nativeUI) run(hidden bool) {
 	}
 }
 func (u *nativeUI) notify() { winPost.Call(u.hwnd, appUpdate, 0, 0) }
+func (u *nativeUI) syncRecoveryInput(enabled bool) {
+	if u.recoveryInput == enabled {
+		return
+	}
+	if err := setRecoveryMouseInput(u.hwnd, enabled); err != nil {
+		if enabled {
+			u.note = "无法监听鼠标恢复活动：" + err.Error()
+		}
+		return
+	}
+	u.recoveryInput = enabled
+}
 func deviceTopologyChanged(old, next []hub.Device) bool {
 	if len(old) != len(next) {
 		return true
@@ -413,6 +434,7 @@ func (u *nativeUI) hide() {
 }
 func (u *nativeUI) cleanup() {
 	u.closeOnce.Do(func() {
+		u.syncRecoveryInput(false)
 		if u.hook != 0 {
 			user32.NewProc("UnhookWinEvent").Call(u.hook)
 		}

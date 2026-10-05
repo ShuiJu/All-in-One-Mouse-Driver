@@ -23,35 +23,119 @@ type State struct {
 	CaptureUntil int64           `json:"captureUntil"`
 }
 type Engine struct {
-	mu              sync.Mutex
-	io              sync.Mutex
-	path            string
-	state           State
-	hw              Hardware
-	foreground      func() (string, error)
-	conflicts       func() map[string]bool
-	last            map[string]Parameters
-	batteryAt       map[string]time.Time
-	captureBrand    string
-	captureProfile  string
-	wake            chan struct{}
-	visible         atomic.Bool
-	scanRequested   atomic.Bool
-	topologyChanged atomic.Bool
-	lastScan        time.Time
-	cachedDevices   []Device
-	cachedError     error
-	changed         func()
-	steps           atomic.Uint64
-	scans           atomic.Uint64
-	writes          atomic.Uint64
-	queries         atomic.Uint64
+	mu                sync.Mutex
+	io                sync.Mutex
+	path              string
+	state             State
+	hw                Hardware
+	foreground        func() (string, error)
+	conflicts         func() map[string]bool
+	last              map[string]Parameters
+	batteryAt         map[string]time.Time
+	captureBrand      string
+	captureProfile    string
+	wake              chan struct{}
+	visible           atomic.Bool
+	scanRequested     atomic.Bool
+	topologyChanged   atomic.Bool
+	recoveryPending   atomic.Bool
+	recoveryTargets   map[string]bool
+	recoveryRequested map[string]bool
+	recoveryLastNano  map[string]int64
+	lastScan          time.Time
+	cachedDevices     []Device
+	cachedError       error
+	changed           func()
+	steps             atomic.Uint64
+	scans             atomic.Uint64
+	writes            atomic.Uint64
+	queries           atomic.Uint64
 }
 
 type Counters struct{ Steps, DeviceScans, Writes, BatteryQueries uint64 }
 
 func (e *Engine) Counters() Counters {
 	return Counters{e.steps.Load(), e.scans.Load(), e.writes.Load(), e.queries.Load()}
+}
+
+// NeedsRecovery is true while one or more devices need user/device activity
+// before another device operation is worthwhile.
+func (e *Engine) NeedsRecovery() bool { return e.recoveryPending.Load() }
+
+const recoveryActivityCooldown = 2 * time.Second
+
+func recoveryPathKey(path string) string {
+	path = strings.ToLower(strings.TrimSpace(path))
+	for _, marker := range []string{"&mi_", "#mi_", "&col", "#col"} {
+		for {
+			i := strings.Index(path, marker)
+			if i < 0 || len(path) < i+len(marker)+2 {
+				break
+			}
+			path = path[:i] + path[i+len(marker)+2:]
+		}
+	}
+	return strings.TrimSuffix(path, `\kbd`)
+}
+
+func recoveryPathMatches(devicePath, inputPath string) bool {
+	if devicePath == "" || inputPath == "" {
+		return false
+	}
+	return recoveryPathKey(devicePath) == recoveryPathKey(inputPath)
+}
+
+// NotifyMouseActivity is called only while recovery input is registered. It
+// does no HID work; it queues one retry for the matching physical device.
+func (e *Engine) NotifyMouseActivity(path string) bool {
+	if path == "" || !e.recoveryPending.Load() {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var id string
+	for targetID := range e.recoveryTargets {
+		for _, d := range e.state.Devices {
+			if d.ID == targetID && recoveryPathMatches(d.path, path) {
+				id = targetID
+				break
+			}
+		}
+		if id != "" {
+			break
+		}
+	}
+	if id == "" {
+		if len(e.recoveryTargets) > 0 {
+			return false
+		}
+		now := time.Now().UnixNano()
+		if last := e.recoveryLastNano[""]; last != 0 && now-last < recoveryActivityCooldown.Nanoseconds() {
+			return false
+		}
+		e.recoveryLastNano[""] = now
+		e.scanRequested.Store(true)
+		e.Wake()
+		return true
+	}
+	now := time.Now().UnixNano()
+	if last := e.recoveryLastNano[id]; last != 0 && now-last < recoveryActivityCooldown.Nanoseconds() {
+		return false
+	}
+	if e.recoveryRequested == nil {
+		e.recoveryRequested = map[string]bool{}
+	}
+	if e.recoveryRequested[id] {
+		return false
+	}
+	e.recoveryLastNano[id] = now
+	e.recoveryRequested[id] = true
+	delete(e.last, id)
+	delete(e.batteryAt, id)
+	e.cachedDevices = append([]Device(nil), e.state.Devices...)
+	e.cachedError = nil
+	e.Wake()
+	return true
 }
 
 // SetNotify is set before Run starts. It must only post a message, not read state.
@@ -73,7 +157,13 @@ func NewEngine(path string, hw Hardware, fg func() (string, error), conflicts fu
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{path: path, hw: hw, foreground: fg, conflicts: conflicts, last: map[string]Parameters{}, batteryAt: map[string]time.Time{}, wake: make(chan struct{}, 1), state: State{Config: c, Devices: []Device{}, Events: []Event{}, Conflicts: map[string]bool{}}}, nil
+	return &Engine{
+		path: path, hw: hw, foreground: fg, conflicts: conflicts,
+		last: map[string]Parameters{}, batteryAt: map[string]time.Time{},
+		recoveryTargets: map[string]bool{}, recoveryRequested: map[string]bool{}, recoveryLastNano: map[string]int64{},
+		wake:  make(chan struct{}, 1),
+		state: State{Config: c, Devices: []Device{}, Events: []Event{}, Conflicts: map[string]bool{}},
+	}, nil
 }
 func (e *Engine) Snapshot() State {
 	e.mu.Lock()
@@ -136,10 +226,7 @@ func (e *Engine) CancelCapture() {
 	e.mu.Unlock()
 }
 func (e *Engine) Run(ctx context.Context) {
-	maintenance := time.NewTicker(5 * time.Minute)
-	defer maintenance.Stop()
-	retryDelay := 5 * time.Second
-	var retry <-chan time.Time
+	var capture <-chan time.Time
 	var timer *time.Timer
 	defer func() {
 		if timer != nil {
@@ -159,39 +246,20 @@ func (e *Engine) Run(ctx context.Context) {
 				delay = time.Millisecond
 			}
 		}
-		failed := false
-		for _, d := range e.state.Devices {
-			if strings.HasPrefix(d.Status, "应用失败") {
-				failed = true
-			}
-		}
 		e.mu.Unlock()
-		if failed {
-			if delay == 0 || delay > retryDelay {
-				delay = retryDelay
-			}
-			retryDelay *= 2
-			if retryDelay > time.Minute {
-				retryDelay = time.Minute
-			}
-		} else {
-			retryDelay = 5 * time.Second
-		}
 		if timer != nil {
 			timer.Stop()
 		}
-		retry = nil
+		capture = nil
 		if delay > 0 {
 			timer = time.NewTimer(delay)
-			retry = timer.C
+			capture = timer.C
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-e.wake:
-		case <-maintenance.C:
-			e.scanRequested.Store(true)
-		case <-retry:
+		case <-capture:
 		}
 	}
 }
@@ -208,7 +276,9 @@ func (e *Engine) step(force bool) {
 	proc, fgErr := e.foreground()
 	conflict := e.conflicts()
 	requested := e.scanRequested.Swap(false)
-	if force || e.lastScan.IsZero() || requested {
+	scanNow := force || e.lastScan.IsZero() || requested
+	refreshBattery := scanNow
+	if scanNow {
 		e.cachedDevices, e.cachedError = e.hw.Discover()
 		e.lastScan = time.Now()
 		e.scans.Add(1)
@@ -216,11 +286,18 @@ func (e *Engine) step(force bool) {
 	devices, discoverErr := append([]Device(nil), e.cachedDevices...), e.cachedError
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	recoveryActivity := map[string]bool{}
+	for id := range e.recoveryRequested {
+		recoveryActivity[id] = true
+	}
+	e.recoveryRequested = map[string]bool{}
+	refreshBattery = refreshBattery || len(recoveryActivity) > 0
+	activityOnly := len(recoveryActivity) > 0 && !scanNow
 	e.state.Foreground = proc
 	e.state.Conflicts = conflict
 	e.state.Error = ""
 	if discoverErr != nil {
-		e.state.Error = discoverErr.Error()
+		e.state.Error = "设备暂时无响应，移动鼠标唤醒后将自动恢复：" + discoverErr.Error()
 	}
 	if e.captureBrand != "" && time.Now().UnixMilli() >= e.state.CaptureUntil {
 		if fgErr != nil {
@@ -241,39 +318,89 @@ func (e *Engine) step(force bool) {
 		e.state.CaptureUntil = 0
 	}
 
-	present := map[string]bool{}
 	previous := map[string]Device{}
-	for _, d := range e.state.Devices {
+	previousDevices := append([]Device(nil), e.state.Devices...)
+	for _, d := range previousDevices {
 		previous[d.ID] = d
 	}
+	if discoverErr != nil {
+		seen := map[string]bool{}
+		for _, d := range devices {
+			seen[d.ID] = true
+		}
+		for _, old := range previousDevices {
+			if !seen[old.ID] {
+				devices = append(devices, old)
+			}
+		}
+	}
+	nextTargets := map[string]bool{}
+	for id := range e.recoveryTargets {
+		nextTargets[id] = true
+	}
+	if discoverErr != nil {
+		for _, d := range devices {
+			nextTargets[d.ID] = true
+		}
+	}
+
+	present := map[string]bool{}
 	for i := range devices {
 		d := &devices[i]
 		present[d.ID] = true
+		old, hadOld := previous[d.ID]
+		if d.Brand == "vaxee" && d.MousePID == 0 && hadOld && old.MousePID != 0 {
+			d.Name = old.Name
+			d.MousePID = old.MousePID
+			d.IdentitySource = old.IdentitySource
+		}
 		p, kind := e.state.Config.Resolve(*d, proc)
 		d.Profile = kind
 		d.Status = "自动切换已暂停"
+		if !e.state.Config.AutoEnabled {
+			delete(nextTargets, d.ID)
+		}
+		blocked := activityOnly && !recoveryActivity[d.ID]
+		blocked = blocked || (e.recoveryTargets[d.ID] && !recoveryActivity[d.ID] && !scanNow)
 		if conflict[d.Brand] {
 			d.Status = "旧版程序正在运行，已暂停设备通信"
 			delete(e.last, d.ID)
 			delete(e.batteryAt, d.ID)
+			delete(nextTargets, d.ID)
+		} else if discoverErr != nil {
+			d.Status = "设备暂时无响应，移动鼠标唤醒后将自动恢复"
+			if hadOld {
+				d.Battery = old.Battery
+				d.Charging = old.Charging
+				d.Applied = old.Applied
+			}
+		} else if blocked {
+			d.Battery = old.Battery
+			d.Charging = old.Charging
+			d.Applied = old.Applied
+			if old.Applied != nil {
+				d.Status = "已应用"
+			} else {
+				d.Status = "设备暂时无响应，移动鼠标唤醒后将自动恢复"
+			}
 		} else {
-			old := previous[d.ID]
 			d.Battery = old.Battery
 			d.Charging = old.Charging
 			batteryInterval := 5 * time.Minute
 			if e.visible.Load() {
 				batteryInterval = time.Minute
 			}
-			if time.Since(e.batteryAt[d.ID]) >= batteryInterval {
+			if refreshBattery && time.Since(e.batteryAt[d.ID]) >= batteryInterval {
 				d.Battery, d.Charging = e.hw.Battery(*d)
 				e.queries.Add(1)
 				e.batteryAt[d.ID] = time.Now()
 			}
 			if e.state.Config.AutoEnabled && fgErr == nil {
 				last, ok := e.last[d.ID]
-				if !ok || last != p {
+				if recoveryActivity[d.ID] || !ok || last != p {
 					e.writes.Add(1)
 					if err := e.hw.Apply(*d, p); err != nil {
+						nextTargets[d.ID] = true
 						d.Status = "应用失败：" + err.Error()
 						delete(e.last, d.ID)
 						if d.Status != old.Status {
@@ -281,7 +408,8 @@ func (e *Engine) step(force bool) {
 						}
 					} else {
 						e.last[d.ID] = p
-						d.Status = "已应用"
+						delete(nextTargets, d.ID)
+						delete(e.recoveryLastNano, d.ID)
 						e.event(fmt.Sprintf("%s → %s · %d Hz", d.Name, kind, p.Poll))
 					}
 				} else {
@@ -300,9 +428,21 @@ func (e *Engine) step(force bool) {
 		if !present[id] {
 			delete(e.last, id)
 			delete(e.batteryAt, id)
+			delete(e.recoveryLastNano, id)
+		}
+	}
+	for id := range nextTargets {
+		if !present[id] {
+			delete(nextTargets, id)
 		}
 	}
 	e.state.Devices = devices
+	e.recoveryTargets = nextTargets
+	pending := len(nextTargets) > 0
+	if !pending && discoverErr != nil && len(devices) == 0 && e.state.Config.AutoEnabled {
+		pending = true
+	}
+	e.recoveryPending.Store(pending)
 }
 func (e *Engine) ApplyManual(id, kind string) error {
 	e.io.Lock()
@@ -326,6 +466,9 @@ func (e *Engine) ApplyManual(id, kind string) error {
 		}
 		params := p.ForDevice(*d)
 		if err := e.hw.Apply(*d, params); err != nil {
+			delete(e.recoveryTargets, id)
+			delete(e.recoveryLastNano, id)
+			e.recoveryPending.Store(len(e.recoveryTargets) > 0)
 			delete(e.last, id)
 			d.Applied = nil
 			d.Status = "应用失败：" + err.Error()
@@ -336,6 +479,10 @@ func (e *Engine) ApplyManual(id, kind string) error {
 		d.Applied = &params
 		d.Status = "手动应用成功"
 		d.Profile = kind
+		delete(e.recoveryTargets, id)
+		delete(e.recoveryRequested, id)
+		delete(e.recoveryLastNano, id)
+		e.recoveryPending.Store(len(e.recoveryTargets) > 0)
 		e.event(d.Name + " · 手动应用成功")
 		return nil
 	}

@@ -58,14 +58,18 @@ func TestEventLoopCachesDevicesAndSleeps(t *testing.T) {
 }
 
 type fakeHardware struct {
-	devices   []Device
-	writes    []string
-	values    []Parameters
-	fail      bool
-	batteries int
+	devices     []Device
+	writes      []string
+	values      []Parameters
+	fail        bool
+	discoverErr error
+	batteries   int
 }
 
-func (f *fakeHardware) Discover() ([]Device, error) { return append([]Device{}, f.devices...), nil }
+func (f *fakeHardware) Discover() ([]Device, error) {
+	return append([]Device{}, f.devices...), f.discoverErr
+}
+
 func (f *fakeHardware) Apply(d Device, p Parameters) error {
 	f.writes = append(f.writes, d.ID)
 	f.values = append(f.values, p)
@@ -79,7 +83,11 @@ func setup(t *testing.T) (*Engine, *fakeHardware, *string, *bool) {
 	t.Helper()
 	fg := "notepad.exe"
 	conflict := false
-	hw := &fakeHardware{devices: []Device{{ID: "l1", Brand: "lamzu", Name: "INCA"}, {ID: "v1", Brand: "vaxee", Name: "E1"}, {ID: "v2", Brand: "vaxee", Name: "NP-01S"}}}
+	hw := &fakeHardware{devices: []Device{
+		{ID: "l1", Brand: "lamzu", Name: "INCA", path: `\\?\hid#vid_37b0&pid_0010&mi_02#l1`},
+		{ID: "v1", Brand: "vaxee", Name: "E1", path: `\\?\hid#vid_25a7&pid_2001&mi_00#v1`},
+		{ID: "v2", Brand: "vaxee", Name: "NP-01S", path: `\\?\hid#vid_25a7&pid_2001&mi_00#v2`},
+	}}
 	e, err := NewEngine(filepath.Join(t.TempDir(), "config.json"), hw, func() (string, error) { return fg, nil }, func() map[string]bool { return map[string]bool{"lamzu": conflict, "vaxee": conflict} })
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +148,81 @@ func TestReconnectRetriesAndPartialFailure(t *testing.T) {
 		t.Fatal("successful retry not visible")
 	}
 }
+func TestDiscoveryErrorRetainsDevicesUntilActivity(t *testing.T) {
+	e, hw, _, _ := setup(t)
+	e.Tick()
+	hw.discoverErr = errors.New("mouse sleeping")
+	e.DevicesChanged()
+	e.Tick()
+	s := e.Snapshot()
+	if len(s.Devices) != 3 || !e.NeedsRecovery() {
+		t.Fatalf("sleeping discovery lost state: devices=%d recovery=%v", len(s.Devices), e.NeedsRecovery())
+	}
+	for _, d := range s.Devices {
+		if d.Status != "设备暂时无响应，移动鼠标唤醒后将自动恢复" {
+			t.Fatalf("unexpected sleeping status: %+v", d)
+		}
+	}
+	writes := len(hw.writes)
+	hw.discoverErr = nil
+	if !e.NotifyMouseActivity(`\\?\hid#vid_37b0&pid_0010&mi_02#l1`) {
+		t.Fatal("known recovery activity was not accepted")
+	}
+	e.step(false)
+	if len(hw.writes) != writes+1 || !e.NeedsRecovery() || hw.writes[len(hw.writes)-1] != "l1" {
+		t.Fatalf("activity touched the wrong devices: writes=%v recovery=%v", hw.writes, e.NeedsRecovery())
+	}
+	e.NotifyMouseActivity(`\\?\hid#vid_25a7&pid_2001&mi_00#v1`)
+	e.step(false)
+	e.NotifyMouseActivity(`\\?\hid#vid_25a7&pid_2001&mi_00#v2`)
+	e.step(false)
+	if len(hw.writes) != writes+3 || e.NeedsRecovery() {
+		t.Fatalf("activity did not recover devices: writes=%d recovery=%v", len(hw.writes), e.NeedsRecovery())
+	}
+}
+func TestRecoveryActivityCoalesces(t *testing.T) {
+	e, _, _, _ := setup(t)
+	e.Tick()
+	e.recoveryTargets["l1"] = true
+	e.recoveryPending.Store(true)
+	if !e.NotifyMouseActivity(`\\?\hid#vid_37b0&pid_0010&mi_02#l1`) {
+		t.Fatal("first recovery activity was rejected")
+	}
+	if e.NotifyMouseActivity(`\\?\hid#vid_37b0&pid_0010&mi_02#l1`) {
+		t.Fatal("recovery activity was not coalesced")
+	}
+	if !e.NeedsRecovery() || e.scanRequested.Load() || len(e.recoveryRequested) != 1 {
+		t.Fatal("recovery activity was not throttled")
+	}
+}
+func TestRecoveryPathMatchesPhysicalDevice(t *testing.T) {
+	base := `\\?\hid#vid_25a7&pid_2001#receiver-a`
+	if !recoveryPathMatches(base+`&mi_02#collection`, base+`&mi_00#collection&col01\kbd`) {
+		t.Fatal("interface paths for one physical device did not match")
+	}
+	if recoveryPathMatches(base, `\\?\hid#vid_25a7&pid_2001#receiver-b`) {
+		t.Fatal("different physical devices matched")
+	}
+}
+func TestUnknownRecoveryScansAfterActivity(t *testing.T) {
+	e, hw, _, _ := setup(t)
+	known := hw.devices
+	hw.devices = nil
+	hw.discoverErr = errors.New("mouse sleeping")
+	e.Tick()
+	if len(e.Snapshot().Devices) != 0 || !e.NeedsRecovery() {
+		t.Fatal("startup discovery did not retain an unknown recovery candidate")
+	}
+	hw.devices = known
+	hw.discoverErr = nil
+	if !e.NotifyMouseActivity(`\\?\hid#vid_25a7&pid_2001&mi_00#unknown`) {
+		t.Fatal("unknown recovery activity was not accepted")
+	}
+	e.step(false)
+	if len(e.Snapshot().Devices) != 3 || len(hw.writes) != 3 || e.NeedsRecovery() {
+		t.Fatalf("activity did not recover unknown devices: devices=%d writes=%d recovery=%v", len(e.Snapshot().Devices), len(hw.writes), e.NeedsRecovery())
+	}
+}
 func TestLegacyConflictBlocksWritesAndBatteryRequests(t *testing.T) {
 	e, hw, _, conflict := setup(t)
 	*conflict = true
@@ -184,6 +267,18 @@ func TestBatteryCaching(t *testing.T) {
 	e.Tick()
 	if hw.batteries != 3 {
 		t.Fatalf("battery requested too often: %d", hw.batteries)
+	}
+}
+func TestForegroundEventDoesNotPollBattery(t *testing.T) {
+	e, hw, _, _ := setup(t)
+	e.Tick()
+	for id := range e.batteryAt {
+		e.batteryAt[id] = time.Now().Add(-10 * time.Minute)
+	}
+	before := hw.batteries
+	e.step(false)
+	if hw.batteries != before {
+		t.Fatalf("foreground step polled battery: before=%d after=%d", before, hw.batteries)
 	}
 }
 func TestSnapshotAndUpdateIsolation(t *testing.T) {
