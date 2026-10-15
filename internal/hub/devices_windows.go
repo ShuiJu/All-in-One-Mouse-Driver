@@ -2,6 +2,7 @@ package hub
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"mousehub/internal/lamzu"
 	"mousehub/internal/platform"
@@ -11,20 +12,24 @@ import (
 )
 
 type Device struct {
-	ID             string      `json:"id"`
-	Brand          string      `json:"brand"`
-	Name           string      `json:"name"`
-	Battery        *int        `json:"battery"`
-	Charging       bool        `json:"charging"`
-	Status         string      `json:"status"`
-	Applied        *Parameters `json:"applied"`
-	Profile        string      `json:"profile"`
-	MousePID       uint16      `json:"mousePID"`
-	IdentitySource string      `json:"identitySource"`
-	path           string
-	l              lamzu.LamzuDeviceInfo
-	v              vaxee.VaxeeDeviceInfo
-	serial         string
+	ID                  string      `json:"id"`
+	Brand               string      `json:"brand"`
+	Name                string      `json:"name"`
+	Battery             *int        `json:"battery"`
+	Charging            bool        `json:"charging"`
+	Status              string      `json:"status"`
+	Applied             *Parameters `json:"applied"`
+	Profile             string      `json:"profile"`
+	MousePID            uint16      `json:"mousePID"`
+	MouseModel          string      `json:"mouseModel,omitempty"`
+	IdentityStatus      string      `json:"identityStatus,omitempty"`
+	IdentityCode        string      `json:"identityCode,omitempty"`
+	IdentitySource      string      `json:"identitySource"`
+	TrajectorySupported bool        `json:"trajectorySupported"`
+	path                string
+	l                   lamzu.LamzuDeviceInfo
+	v                   vaxee.VaxeeDeviceInfo
+	serial              string
 }
 type Hardware interface {
 	Discover() ([]Device, error)
@@ -46,11 +51,30 @@ func (WindowsHardware) Discover() ([]Device, error) {
 	seen := map[string]bool{}
 	for _, d := range ls {
 		p := strings.ToLower(d.Path)
-		if !strings.Contains(p, "mi_02") || strings.HasSuffix(p, `\kbd`) || seen[p] {
+		if !lamzu.IsControlDevice(d) || seen[p] {
 			continue
 		}
 		seen[p] = true
-		out = append(out, Device{ID: deviceID("lamzu", p), Brand: "lamzu", Name: "LAMZU INCA", path: d.Path, l: d, serial: platform.HIDSerial(d.Path)})
+		identity, identityErr := lamzu.ReadIdentity(d)
+		device := Device{ID: deviceID("lamzu", p), Brand: "lamzu", Name: "LAMZU 8K Receiver", path: d.Path, l: d, serial: platform.HIDSerial(d.Path), IdentityStatus: IdentityUnavailable, IdentitySource: "未收到有效鼠标身份回复"}
+		if errors.Is(identityErr, lamzu.ErrNoMouse) {
+			device.IdentityStatus = IdentityDisconnected
+			device.IdentitySource = "接收器明确回复无鼠标连接"
+		} else {
+			_, trajectoryErr := lamzu.ReadTrajectory(d)
+			device.TrajectorySupported = trajectoryErr == nil
+			if identityErr == nil {
+				device.MousePID = identity.MousePID
+				device.MouseModel = identity.Model
+				device.IdentityCode = fmt.Sprintf("PID 0x%04X", identity.MousePID)
+				device.IdentitySource = "鼠标固件版本回复中的 PID"
+				device.IdentityStatus = IdentityCurrent
+				if identity.Model == "" {
+					device.IdentityStatus = IdentityUnknown
+				}
+			}
+		}
+		out = append(out, device)
 	}
 	vs, err := vaxee.EnumerateVaxeeDevices()
 	if err != nil {
@@ -63,14 +87,21 @@ func (WindowsHardware) Discover() ([]Device, error) {
 		}
 		for _, d := range controls {
 			identity, readErr := vaxee.ReadIdentity(d)
-			name, source := "VAXEE · 型号未确认", "未取得鼠标型号响应"
+			device := Device{ID: deviceID("vaxee", d.Path), Brand: "vaxee", Name: "VAXEE 接收器", path: d.Path, v: d, serial: platform.HIDSerial(d.Path), TrajectorySupported: true, IdentityStatus: IdentityUnavailable, IdentitySource: "未收到有效鼠标身份回复"}
 			if readErr == nil {
-				name = identity.Model
-				source = "接收器查询鼠标 PID（0x0A）"
-			} else {
-				source = readErr.Error()
+				device.MousePID = identity.MousePID
+				device.MouseModel = identity.Model
+				device.IdentityCode = fmt.Sprintf("PID 0x%04X", identity.MousePID)
+				device.IdentitySource = "接收器鼠标 PID 查询"
+				device.IdentityStatus = IdentityCurrent
+				if identity.Model != "" {
+					device.Name = identity.Model
+				} else {
+					device.IdentityStatus = IdentityUnknown
+					device.Name = "VAXEE 鼠标"
+				}
 			}
-			out = append(out, Device{ID: deviceID("vaxee", d.Path), Brand: "vaxee", Name: name, path: d.Path, v: d, MousePID: identity.MousePID, IdentitySource: source, serial: platform.HIDSerial(d.Path)})
+			out = append(out, device)
 		}
 	}
 	assignDeviceIDs(out)
@@ -108,7 +139,18 @@ func (WindowsHardware) Apply(d Device, p Parameters) error {
 		if p.Mode == "20000fps" {
 			m = lamzu.Perf20000FPS
 		}
-		if err := lamzu.ApplyLamzuSetting(d.path, m, lamzu.PollingRate(p.Poll), p.MotionSync, p.Sleep); err != nil {
+		var trajectory *lamzu.TrajectoryMode
+		if p.Trajectory != "" {
+			if !d.TrajectorySupported {
+				return lamzu.ErrTrajectoryUnsupported
+			}
+			mode := lamzu.TrajStable
+			if p.Trajectory == "smooth" {
+				mode = lamzu.TrajSmooth
+			}
+			trajectory = &mode
+		}
+		if err := lamzu.ApplyLamzuSetting(d.path, m, lamzu.PollingRate(p.Poll), p.MotionSync, p.Sleep, trajectory); err != nil {
 			return err
 		}
 		return verifyApplied(d, p)
@@ -134,7 +176,7 @@ func (WindowsHardware) Battery(d Device) (*int, bool) {
 	var p int
 	var ch, ok bool
 	if d.Brand == "lamzu" {
-		p, ch, ok = lamzu.ReadBatteryINCA(d.l)
+		p, ch, ok = lamzu.ReadBattery(d.l)
 	} else {
 		p, ch, ok = vaxee.ReadBatteryVAXEE(d.v)
 	}

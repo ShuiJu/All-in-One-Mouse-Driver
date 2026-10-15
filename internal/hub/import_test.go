@@ -20,7 +20,7 @@ func TestLegacyImportsPreserveSourcesAndBrands(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, _ := e.Snapshot().Config.Resolve(Device{Brand: "lamzu"}, "cs2.exe")
-	if first.Poll != 8000 || !first.MotionSync || first.Sleep != 600 {
+	if first.Poll != 8000 || !first.MotionSync || first.Sleep != 600 || first.Trajectory != "" {
 		t.Fatal(first)
 	}
 	if err := e.ImportLegacy("vaxee", v); err != nil {

@@ -10,7 +10,6 @@ import (
 	"mousehub/internal/hub"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -54,12 +53,12 @@ func loadPNGAsset(name string) (*rgbaBitmap, error) {
 		px[i], px[i+2] = px[i+2], px[i]
 	}
 	type bitmapInfoHeader struct {
-		Size                                   uint32
-		Width, Height                          int32
-		Planes, BitCount                       uint16
-		Compression, SizeImage                 uint32
-		XPelsPerMeter, YPelsPerMeter           int32
-		ClrUsed, ClrImportant                  uint32
+		Size                         uint32
+		Width, Height                int32
+		Planes, BitCount             uint16
+		Compression, SizeImage       uint32
+		XPelsPerMeter, YPelsPerMeter int32
+		ClrUsed, ClrImportant        uint32
 	}
 	var bi struct {
 		Header bitmapInfoHeader
@@ -111,11 +110,17 @@ func releaseEmbeddedAssets() {
 }
 
 func mouseAssetKey(d *hub.Device) string {
-	if d == nil {
+	if d == nil || d.IdentityStatus == hub.IdentityCached || d.IdentityStatus == hub.IdentityUnavailable || d.IdentityStatus == hub.IdentityDisconnected {
 		return ""
 	}
 	if d.Brand == "lamzu" {
-		return "lamzu-inca"
+		if d.MouseModel == "LAMZU INCA" {
+			return "lamzu-inca"
+		}
+		return ""
+	}
+	if d.Brand != "vaxee" {
+		return ""
 	}
 	switch d.MousePID {
 	case 0x1010:
@@ -123,14 +128,7 @@ func mouseAssetKey(d *hub.Device) string {
 	case 0x1011:
 		return "vaxee-np01sv2"
 	}
-	name := strings.ToUpper(d.Name)
-	if strings.Contains(name, "NP-01") || strings.Contains(name, "NP01") {
-		return "vaxee-np01sv2"
-	}
-	if strings.Contains(name, "E1") {
-		return "vaxee-e1"
-	}
-	return "vaxee-e1"
+	return ""
 }
 
 func (u *nativeUI) drawMouseImage(dc uintptr, key string, x, y, w, h int) bool {

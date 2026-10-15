@@ -23,33 +23,34 @@ type State struct {
 	CaptureUntil int64           `json:"captureUntil"`
 }
 type Engine struct {
-	mu                sync.Mutex
-	io                sync.Mutex
-	path              string
-	state             State
-	hw                Hardware
-	foreground        func() (string, error)
-	conflicts         func() map[string]bool
-	last              map[string]Parameters
-	batteryAt         map[string]time.Time
-	captureBrand      string
-	captureProfile    string
-	wake              chan struct{}
-	visible           atomic.Bool
-	scanRequested     atomic.Bool
-	topologyChanged   atomic.Bool
-	recoveryPending   atomic.Bool
-	recoveryTargets   map[string]bool
-	recoveryRequested map[string]bool
-	recoveryLastNano  map[string]int64
-	lastScan          time.Time
-	cachedDevices     []Device
-	cachedError       error
-	changed           func()
-	steps             atomic.Uint64
-	scans             atomic.Uint64
-	writes            atomic.Uint64
-	queries           atomic.Uint64
+	mu                     sync.Mutex
+	io                     sync.Mutex
+	path                   string
+	state                  State
+	hw                     Hardware
+	foreground             func() (string, error)
+	conflicts              func() map[string]bool
+	last                   map[string]Parameters
+	batteryAt              map[string]time.Time
+	captureBrand           string
+	captureProfile         string
+	wake                   chan struct{}
+	visible                atomic.Bool
+	scanRequested          atomic.Bool
+	topologyChanged        atomic.Bool
+	statusRefreshRequested atomic.Bool
+	recoveryPending        atomic.Bool
+	recoveryTargets        map[string]bool
+	recoveryRequested      map[string]bool
+	recoveryLastNano       map[string]int64
+	lastScan               time.Time
+	cachedDevices          []Device
+	cachedError            error
+	changed                func()
+	steps                  atomic.Uint64
+	scans                  atomic.Uint64
+	writes                 atomic.Uint64
+	queries                atomic.Uint64
 }
 
 type Counters struct{ Steps, DeviceScans, Writes, BatteryQueries uint64 }
@@ -149,6 +150,12 @@ func (e *Engine) SetVisible(v bool) {
 func (e *Engine) DevicesChanged() {
 	e.topologyChanged.Store(true)
 	e.scanRequested.Store(true)
+	e.Wake()
+}
+
+// RefreshDevices updates observed device state without treating it as a reconnect.
+func (e *Engine) RefreshDevices() {
+	e.statusRefreshRequested.Store(true)
 	e.Wake()
 }
 
@@ -276,7 +283,8 @@ func (e *Engine) step(force bool) {
 	proc, fgErr := e.foreground()
 	conflict := e.conflicts()
 	requested := e.scanRequested.Swap(false)
-	scanNow := force || e.lastScan.IsZero() || requested
+	statusRefresh := e.statusRefreshRequested.Swap(false)
+	scanNow := force || e.lastScan.IsZero() || requested || statusRefresh
 	refreshBattery := scanNow
 	if scanNow {
 		e.cachedDevices, e.cachedError = e.hw.Discover()
@@ -297,7 +305,7 @@ func (e *Engine) step(force bool) {
 	e.state.Conflicts = conflict
 	e.state.Error = ""
 	if discoverErr != nil {
-		e.state.Error = "设备暂时无响应，移动鼠标唤醒后将自动恢复：" + discoverErr.Error()
+		e.state.Error = "离线"
 	}
 	if e.captureBrand != "" && time.Now().UnixMilli() >= e.state.CaptureUntil {
 		if fgErr != nil {
@@ -330,6 +338,9 @@ func (e *Engine) step(force bool) {
 		}
 		for _, old := range previousDevices {
 			if !seen[old.ID] {
+				if old.IdentityStatus == IdentityCurrent || old.IdentityStatus == IdentityUnknown || old.IdentityStatus == IdentityCached {
+					old.IdentityStatus = IdentityCached
+				}
 				devices = append(devices, old)
 			}
 		}
@@ -349,10 +360,14 @@ func (e *Engine) step(force bool) {
 		d := &devices[i]
 		present[d.ID] = true
 		old, hadOld := previous[d.ID]
-		if d.Brand == "vaxee" && d.MousePID == 0 && hadOld && old.MousePID != 0 {
-			d.Name = old.Name
-			d.MousePID = old.MousePID
-			d.IdentitySource = old.IdentitySource
+		if mergeMouseIdentity(d, old) {
+			// A different mouse on the same receiver needs independent readback.
+			delete(e.last, d.ID)
+			delete(e.batteryAt, d.ID)
+			old.Battery = nil
+			old.Charging = false
+			old.Applied = nil
+			d.Applied = nil
 		}
 		p, kind := e.state.Config.Resolve(*d, proc)
 		d.Profile = kind
@@ -368,11 +383,16 @@ func (e *Engine) step(force bool) {
 			delete(e.batteryAt, d.ID)
 			delete(nextTargets, d.ID)
 		} else if discoverErr != nil {
-			d.Status = "设备暂时无响应，移动鼠标唤醒后将自动恢复"
+			d.Status = "离线"
 			if hadOld {
 				d.Battery = old.Battery
 				d.Charging = old.Charging
 				d.Applied = old.Applied
+			}
+		} else if d.IdentityStatus == IdentityDisconnected {
+			d.Status = "离线"
+			if e.state.Config.AutoEnabled {
+				nextTargets[d.ID] = true
 			}
 		} else if blocked {
 			d.Battery = old.Battery
@@ -381,16 +401,17 @@ func (e *Engine) step(force bool) {
 			if old.Applied != nil {
 				d.Status = "已应用"
 			} else {
-				d.Status = "设备暂时无响应，移动鼠标唤醒后将自动恢复"
+				d.Status = "离线"
 			}
 		} else {
 			d.Battery = old.Battery
 			d.Charging = old.Charging
+			d.Applied = old.Applied
 			batteryInterval := 5 * time.Minute
 			if e.visible.Load() {
 				batteryInterval = time.Minute
 			}
-			if refreshBattery && time.Since(e.batteryAt[d.ID]) >= batteryInterval {
+			if refreshBattery && (statusRefresh || time.Since(e.batteryAt[d.ID]) >= batteryInterval) {
 				d.Battery, d.Charging = e.hw.Battery(*d)
 				e.queries.Add(1)
 				e.batteryAt[d.ID] = time.Now()
@@ -408,6 +429,8 @@ func (e *Engine) step(force bool) {
 						}
 					} else {
 						e.last[d.ID] = p
+						applied := p
+						d.Applied = &applied
 						delete(nextTargets, d.ID)
 						delete(e.recoveryLastNano, d.ID)
 						e.event(fmt.Sprintf("%s → %s · %d Hz", d.Name, kind, p.Poll))
@@ -418,10 +441,27 @@ func (e *Engine) step(force bool) {
 			} else if e.state.Config.AutoEnabled {
 				d.Status = "等待可识别的前台程序"
 			}
-			if last, ok := e.last[d.ID]; ok {
-				v := last
-				d.Applied = &v
+			if statusRefresh {
+				if reader, ok := e.hw.(interface {
+					ReadSettings(Device) (Parameters, error)
+				}); ok {
+					actual, err := reader.ReadSettings(*d)
+					if err != nil {
+						d.Status = "离线"
+						d.Applied = nil
+						if d.MouseModel != "" {
+							d.IdentityStatus = IdentityCached
+						} else {
+							d.IdentityStatus = IdentityUnavailable
+						}
+					} else {
+						d.Applied = &actual
+					}
+				}
 			}
+		}
+		if d.IdentityStatus == IdentityUnavailable || d.IdentityStatus == IdentityCached {
+			d.Status = "离线"
 		}
 	}
 	for id := range e.last {

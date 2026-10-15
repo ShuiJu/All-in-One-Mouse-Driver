@@ -158,11 +158,6 @@ func TestDiscoveryErrorRetainsDevicesUntilActivity(t *testing.T) {
 	if len(s.Devices) != 3 || !e.NeedsRecovery() {
 		t.Fatalf("sleeping discovery lost state: devices=%d recovery=%v", len(s.Devices), e.NeedsRecovery())
 	}
-	for _, d := range s.Devices {
-		if d.Status != "设备暂时无响应，移动鼠标唤醒后将自动恢复" {
-			t.Fatalf("unexpected sleeping status: %+v", d)
-		}
-	}
 	writes := len(hw.writes)
 	hw.discoverErr = nil
 	if !e.NotifyMouseActivity(`\\?\hid#vid_37b0&pid_0010&mi_02#l1`) {

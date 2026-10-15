@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"mousehub/internal/hub"
 	"strings"
 	"unsafe"
 )
@@ -189,6 +190,21 @@ func (u *nativeUI) paint(hwnd uintptr) {
 func (u *nativeUI) panel(dc uintptr, x, y, w, h int) {
 	rounded(dc, u.box(x, y, w, h), int(u.x(28)), 0x171a1e, 0x1a1e25)
 }
+func mouseIdentityText(d *hub.Device) string {
+	if d == nil || d.IdentityStatus == hub.IdentityCached || d.IdentityStatus == hub.IdentityUnavailable || d.IdentityStatus == hub.IdentityDisconnected {
+		return "离线"
+	}
+	model := d.MouseModel
+	if model == "" {
+		if d.IdentityCode != "" {
+			model = "未识别（" + d.IdentityCode + "）"
+		} else {
+			model = "未取得型号"
+		}
+	}
+	return model
+}
+
 func (u *nativeUI) paintHome(dc uintptr) {
 	u.panel(dc, 290, 122, 700, 505)
 	d := u.selectedDevice()
@@ -202,6 +218,7 @@ func (u *nativeUI) paintHome(dc uintptr) {
 		if d.Charging {
 			sub += " · 充电中"
 		}
+		sub = "鼠标：" + mouseIdentityText(d) + " · " + sub
 	}
 	u.text(dc, name, 325, 150, 620, 42, 28, 0xe9effa, 0)
 	u.text(dc, sub, 325, 203, 600, 32, 13, 0x919eb2, 0)
@@ -211,11 +228,13 @@ func (u *nativeUI) paintHome(dc uintptr) {
 	u.text(dc, "↗", 917, 568, 45, 34, 24, 0x9bb9ff, 1)
 }
 func (u *nativeUI) deviceHeading(dc uintptr) {
-	name := "设备未连接"
+	name, model := "设备未连接", ""
 	if d := u.selectedDevice(); d != nil {
 		name = u.displayName(*d)
+		model = "鼠标：" + mouseIdentityText(d)
 	}
-	u.text(dc, name, 34, 126, 790, 40, 22, 0xe9effa, 0)
+	u.text(dc, name, 34, 118, 790, 32, 22, 0xe9effa, 0)
+	u.text(dc, model, 34, 153, 790, 22, 12, 0x919eb2, 0)
 }
 func (u *nativeUI) paintPerformance(dc uintptr) {
 	u.deviceHeading(dc)
@@ -230,13 +249,40 @@ func (u *nativeUI) paintParameters(dc uintptr) {
 	u.deviceHeading(dc)
 	u.panel(dc, 28, 180, 590, 440)
 	u.panel(dc, 638, 180, 614, 440)
-	u.text(dc, "Motion Sync", 60, 255, 510, 55, 30, 0xedf2fc, 0)
+	motionTitleY := 255
+	if u.brand == "lamzu" {
+		motionTitleY = 220
+	}
+	u.text(dc, "Motion Sync", 60, motionTitleY, 510, 55, 30, 0xedf2fc, 0)
 	title := "休眠时间"
 	if u.brand == "vaxee" {
 		title = "追踪轨迹"
 	}
 	u.text(dc, title, 672, 255, 520, 55, 30, 0xedf2fc, 0)
 	if u.brand == "lamzu" {
+		u.text(dc, "追踪轨迹", 60, 400, 510, 45, 24, 0xedf2fc, 0)
+		description := "配置：未指定（保留设备当前设置）"
+		if u.parameters().Trajectory == "smooth" {
+			description = "配置：顺滑轨迹"
+		} else if u.parameters().Trajectory == "stable" {
+			description = "配置：稳定轨迹"
+		}
+		if !u.incaTrajectorySupported() {
+			description = "需连接支持轨迹切换的新版固件设备"
+		}
+		u.text(dc, description, 60, 539, 510, 25, 13, 0x95a4b9, 0)
+		applied := "已应用：尚未确认"
+		if d := u.selectedDevice(); u.incaTrajectorySupported() && d.Applied != nil {
+			if d.Applied.Trajectory == "smooth" {
+				applied = "已应用：顺滑轨迹"
+			} else if d.Applied.Trajectory == "stable" {
+				applied = "已应用：稳定轨迹"
+			}
+		}
+		if d := u.selectedDevice(); d != nil && (d.IdentityStatus == hub.IdentityCached || d.IdentityStatus == hub.IdentityUnavailable || d.IdentityStatus == hub.IdentityDisconnected) {
+			applied = "离线"
+		}
+		u.text(dc, applied, 60, 574, 510, 25, 13, 0x95a4b9, 0)
 		u.text(dc, "自定义（秒）", 674, 438, 330, 25, 13, 0x95a4b9, 0)
 	}
 }
@@ -272,8 +318,8 @@ func (u *nativeUI) paintOverview(dc uintptr) {
 		return
 	}
 	u.text(dc, "设备名称", 65, 354, 175, 35, 17, 0xaabbd3, 0)
-	u.text(dc, "型号", 65, 234, 175, 35, 17, 0xaabbd3, 0)
-	u.text(dc, d.Name, 245, 234, 950, 35, 22, 0xeef4ff, 0)
+	u.text(dc, "鼠标型号", 65, 234, 175, 35, 17, 0xaabbd3, 0)
+	u.text(dc, mouseIdentityText(d), 245, 234, 950, 35, 22, 0xeef4ff, 0)
 	battery := "未知"
 	if d.Battery != nil {
 		battery = fmt.Sprintf("%d%%", *d.Battery)
@@ -283,4 +329,6 @@ func (u *nativeUI) paintOverview(dc uintptr) {
 	u.text(dc, "设备标识", 65, 430, 175, 35, 17, 0xaabbd3, 0)
 	u.text(dc, d.ID, 245, 430, 950, 35, 15, 0xaabbd3, 0)
 	u.text(dc, d.Status, 65, 520, 1120, 45, 14, 0x95a4b9, 0)
+	u.text(dc, "识别依据", 65, 480, 175, 30, 14, 0xaabbd3, 0)
+	u.text(dc, d.IdentitySource, 245, 480, 950, 30, 14, 0x919eb2, 0)
 }

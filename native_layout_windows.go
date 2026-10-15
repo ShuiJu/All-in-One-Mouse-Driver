@@ -33,6 +33,10 @@ func (u *nativeUI) selectedDevice() *hub.Device {
 	}
 	return nil
 }
+func (u *nativeUI) incaTrajectorySupported() bool {
+	d := u.selectedDevice()
+	return d != nil && d.Brand == "lamzu" && d.TrajectorySupported
+}
 
 const devicesPerPage = 4
 
@@ -211,6 +215,7 @@ func (u *nativeUI) layout() {
 	if d := u.selectedDevice(); d != nil {
 		u.brand = d.Brand
 	}
+	u.updateWindowTitle(u.state)
 	u.button("⌂  主页", 26, 20, 114, 47, u.view == "home", false, true, func() { u.navigate("home") })
 	u.button("◇  我的配置", 148, 20, 230, 47, u.view == "profiles", false, true, func() { u.navigate("profiles") })
 	u.button("设置", 1158, 20, 96, 47, u.view == "settings", false, true, func() { u.navigate("settings") })
@@ -272,7 +277,6 @@ func (u *nativeUI) layout() {
 			b := u.button(label, 260+slot*245, 665, 235, 50, u.selected == d.ID, false, true, func() { u.selected = device.ID; u.brand = device.Brand; u.layout() })
 			b.deviceID = d.ID
 		}
-		u.button("刷新设备", 31, 665, 160, 45, false, false, true, func() { u.engine.DevicesChanged(); u.note = "正在检测…"; u.invalidate() })
 		if maxPage > 0 {
 			u.button("‹", 200, 665, 42, 45, false, false, u.devicePage > 0, func() { u.devicePage--; u.layout() })
 			u.button("›", 1234, 665, 42, 45, false, false, u.devicePage < maxPage, func() { u.devicePage++; u.layout() })
@@ -306,9 +310,24 @@ func (u *nativeUI) layout() {
 		}
 		u.saveButtons()
 	case "parameters":
-		u.button("关闭", 60, 380, 245, 55, !u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = false; u.dirty = true; u.layout() })
-		u.button("开启", 321, 380, 245, 55, u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = true; u.dirty = true; u.layout() })
+		motionY := 380
 		if u.brand == "lamzu" {
+			motionY = 300
+		}
+		u.button("关闭", 60, motionY, 245, 55, !u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = false; u.dirty = true; u.layout() })
+		u.button("开启", 321, motionY, 245, 55, u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = true; u.dirty = true; u.layout() })
+		if u.brand == "lamzu" {
+			for i, option := range []struct{ value, label string }{{"smooth", "顺滑轨迹"}, {"stable", "稳定轨迹"}} {
+				value := option.value
+				u.button(option.label, 60+i*261, 465, 245, 55, u.parameters().Trajectory == value, false, u.incaTrajectorySupported(), func() {
+					if !u.incaTrajectorySupported() {
+						return
+					}
+					u.parameters().Trajectory = value
+					u.dirty = true
+					u.layout()
+				})
+			}
 			for i, n := range []int{30, 60, 300, 600} {
 				v := n
 				u.button(fmt.Sprintf("%d 秒", n), 672+i*134, 365, 126, 48, u.parameters().Sleep == n, false, true, func() { u.parameters().Sleep = v; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
@@ -328,7 +347,6 @@ func (u *nativeUI) layout() {
 	case "overview":
 		u.edit("deviceName", u.config.DeviceNames[u.selected], 245, 350, 700, 45, false)
 		u.button("保存名称", 970, 350, 220, 45, false, true, true, u.save)
-		u.button("刷新设备信息", 905, 593, 310, 50, false, false, true, func() { u.engine.DevicesChanged(); u.invalidate() })
 	}
 	u.finishLayout()
 }

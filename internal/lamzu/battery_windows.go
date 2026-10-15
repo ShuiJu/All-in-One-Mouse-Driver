@@ -8,11 +8,11 @@ import (
 	"unsafe"
 )
 
-// ReadBatteryINCA reads battery percent + charging flag on the *control path* (mi_02).
+// ReadBattery reads battery percent + charging flag on the control path (mi_02).
 // It does SetFeature(0x83) once then polls GetFeature on the same handle,
 // skipping ACK frames (a0) until a data frame contains: a1 00 02 02 00 83 [chg] [pct].
-func ReadBatteryINCA(dev LamzuDeviceInfo) (percent int, charging bool, ok bool) {
-	if dev.Path == "" || dev.FeatureLen < 9 {
+func ReadBattery(dev LamzuDeviceInfo) (percent int, charging bool, ok bool) {
+	if !IsControlDevice(dev) || dev.FeatureLen < 9 {
 		return 0, false, false
 	}
 	flen := int(dev.FeatureLen)
@@ -90,15 +90,15 @@ func ReadBatteryINCA(dev LamzuDeviceInfo) (percent int, charging bool, ok bool) 
 	return 0, false, false
 }
 
-func PrintBatteryINCA(dev LamzuDeviceInfo) {
-	pct, chg, ok := ReadBatteryINCA(dev)
+func PrintBattery(dev LamzuDeviceInfo) {
+	pct, chg, ok := ReadBattery(dev)
 	if !ok {
-		fmt.Printf("🔋 INCA Battery: N/A\n")
+		fmt.Printf("LAMZU Battery: N/A\n")
 		return
 	}
 	state := "discharging"
 	if chg {
 		state = "charging"
 	}
-	fmt.Printf("🔋 INCA Battery: %d%% (%s)\n", pct, state)
+	fmt.Printf("LAMZU Battery: %d%% (%s)\n", pct, state)
 }

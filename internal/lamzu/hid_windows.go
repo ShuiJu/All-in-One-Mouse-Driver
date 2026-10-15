@@ -351,28 +351,62 @@ func EnumerateLamzuDevices() ([]LamzuDeviceInfo, error) {
 			continue
 		}
 
-		// 浣犳棩蹇楅噷灏辨槸 0x37b0:0x0010锛岀‖鍖归厤鏈€绋?
-		if info.VID == 0x37b0 && info.PID == 0x0010 {
+		// Only the wireless receiver is supported by this panel.
+		if isKnownLamzuProduct(info.VID, info.PID) {
 			out = append(out, info)
 		}
 	}
 	return out, nil
 }
 
-// 鈽呭己鍒讹細鍙厑璁?mi_02锛堝搴?interface 2锛?
+func isKnownLamzuProduct(vid, pid uint16) bool {
+	return vid == 0x37b0 && pid == 0x0010
+}
+
+// IsControlDevice accepts only the LAMZU receiver's mi_02 control path.
+func IsControlDevice(dev LamzuDeviceInfo) bool {
+	if !isKnownLamzuProduct(dev.VID, dev.PID) || (len(dev.Path) >= 4 && strings.EqualFold(dev.Path[len(dev.Path)-4:], `\kbd`)) {
+		return false
+	}
+	_, fields, ok := strings.Cut(dev.Path, "#")
+	if !ok {
+		return false
+	}
+	fields, _, ok = strings.Cut(fields, "#")
+	if !ok {
+		return false
+	}
+	for fields != "" {
+		field, rest, _ := strings.Cut(fields, "&")
+		if strings.EqualFold(field, "mi_02") {
+			return true
+		}
+		fields = rest
+	}
+	return false
+}
+
+func selectedControlDevice(path string) (LamzuDeviceInfo, error) {
+	dev, ok := queryDeviceInfo(path)
+	if !ok || !IsControlDevice(dev) {
+		return LamzuDeviceInfo{}, fmt.Errorf("selected LAMZU control interface is unavailable")
+	}
+	return dev, nil
+}
+
+// SelectLamzuControlPath selects the wireless receiver's control interface.
 func SelectLamzuControlPath() (LamzuDeviceInfo, error) {
 	ds, err := EnumerateLamzuDevices()
 	if err != nil {
 		return LamzuDeviceInfo{}, err
 	}
 	if len(ds) == 0 {
-		return LamzuDeviceInfo{}, fmt.Errorf("no INCA device found")
+		return LamzuDeviceInfo{}, fmt.Errorf("no supported LAMZU device found")
 	}
 
 	for _, d := range ds {
-		lp := strings.ToLower(d.Path)
-		if strings.Contains(lp, "mi_02") && !strings.HasSuffix(lp, `\kbd`) {
-			log.Printf("[DEV] 寮哄埗閫夋嫨 INCA 鎺у埗閫氶亾 mi_02: %s (FeatureLen=%d)", d.Path, int(d.FeatureLen))
+		if IsControlDevice(d) {
+			log.Printf("LAMZU control interface: %s (PID=%04x, FeatureLen=%d)", d.Path, d.PID, d.FeatureLen)
 			return d, nil
 		}
 	}
@@ -398,7 +432,7 @@ func CountUniqueLamzuDevices(devs []LamzuDeviceInfo) int {
 	seen := make(map[string]struct{}, len(devs))
 	for _, dev := range devs {
 		lp := strings.ToLower(dev.Path)
-		if strings.Contains(lp, "mi_02") && !strings.HasSuffix(lp, `\kbd`) {
+		if IsControlDevice(dev) {
 			seen[lp] = struct{}{}
 		}
 	}
@@ -498,11 +532,68 @@ func dump12(tag string, b []byte) {
 	log.Printf("%s %x", tag, b[start:start+n])
 }
 
-func ApplyLamzuSetting(path string, perf PerfMode, poll PollingRate, motionSync bool, sleepSec int) error {
+type incaPerfCommand struct {
+	cmd byte
+	val byte
+}
+
+func incaPerfCommands(perf PerfMode) ([4]incaPerfCommand, int, error) {
+	commands := [4]incaPerfCommand{
+		{cmd: 0x0B, val: 0x00},
+		{cmd: 0x13, val: 0x00},
+	}
+	switch perf {
+	case PerfOffice:
+		return commands, 2, nil
+	case PerfSpeed:
+		commands[2] = incaPerfCommand{cmd: 0x0B, val: 0x01}
+		return commands, 3, nil
+	case Perf20000FPS:
+		commands[2] = incaPerfCommand{cmd: 0x13, val: 0x01}
+		commands[3] = incaPerfCommand{cmd: 0x0B, val: 0x01}
+		return commands, 4, nil
+	default:
+		return commands, 0, fmt.Errorf("unknown perf mode: %v", perf)
+	}
+}
+
+func applyIncaPerfMode(path string, flen int, perf PerfMode) error {
+	commands, count, err := incaPerfCommands(perf)
+	if err != nil {
+		return err
+	}
+	for i := range count {
+		command := commands[i]
+		req := buildIncaCmdVal(command.cmd, command.val, flen)
+		dump12("[SEND perf]", req)
+		if err := sendFeatureReport(path, req); err != nil {
+			return fmt.Errorf("perf command 0x%02x/0x%02x failed: %w", command.cmd, command.val, err)
+		}
+		time.Sleep(lamzuCommandInterval)
+	}
+	return nil
+}
+
+// A nil trajectory preserves the policy currently selected by the firmware.
+func ApplyLamzuSetting(path string, perf PerfMode, poll PollingRate, motionSync bool, sleepSec int, trajectory *TrajectoryMode) error {
 	// Respect the selected control path; never redirect a write to another mouse.
-	dev, ok := queryDeviceInfo(path)
-	if !ok || dev.VID != 0x37b0 || dev.PID != 0x0010 || !strings.Contains(strings.ToLower(path), "mi_02") {
-		return fmt.Errorf("selected INCA control interface is unavailable")
+	dev, err := selectedControlDevice(path)
+	if err != nil {
+		return err
+	}
+	if _, _, err := incaPerfCommands(perf); err != nil {
+		return err
+	}
+	if sleepSec < 0 || sleepSec > 65535 {
+		return fmt.Errorf("sleep must be between 0 and 65535 seconds")
+	}
+	if trajectory != nil {
+		if err := validateTrajectory(*trajectory); err != nil {
+			return err
+		}
+		if _, err := ReadTrajectory(dev); err != nil {
+			return err
+		}
 	}
 
 	// 鐢?FeatureLen锛堝彇涓嶅埌灏?64锛夛紱鍐欏悗鍥炶涔熺敤鍚屾牱闀垮害
@@ -541,46 +632,9 @@ func ApplyLamzuSetting(path string, perf PerfMode, poll PollingRate, motionSync 
 		dump12("[READ ms   ]", resp)
 	}
 
-	// 3) perf mode (0x0B + 0x13) [1](blob:https://m365.cloud.microsoft/cc5afcbc-93a5-4d76-9405-c2ed4901931e)
-	switch perf {
-	case PerfOffice:
-		req = buildIncaCmdVal(0x0B, 0x00, flen)
-		dump12("[SEND 0B   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("office 0x0B failed: %w", err)
-		}
-		time.Sleep(lamzuCommandInterval)
-		req = buildIncaCmdVal(0x13, 0x00, flen)
-		dump12("[SEND 13   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("office 0x13 failed: %w", err)
-		}
-	case PerfSpeed:
-		req = buildIncaCmdVal(0x0B, 0x01, flen)
-		dump12("[SEND 0B   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("speed 0x0B failed: %w", err)
-		}
-		time.Sleep(lamzuCommandInterval)
-		req = buildIncaCmdVal(0x13, 0x00, flen)
-		dump12("[SEND 13   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("speed 0x13 failed: %w", err)
-		}
-	case Perf20000FPS:
-		req = buildIncaCmdVal(0x0B, 0x01, flen)
-		dump12("[SEND 0B   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("20000fps 0x0B failed: %w", err)
-		}
-		time.Sleep(lamzuCommandInterval)
-		req = buildIncaCmdVal(0x13, 0x01, flen)
-		dump12("[SEND 13   ]", req)
-		if err := sendFeatureReport(path, req); err != nil {
-			return fmt.Errorf("20000fps 0x13 failed: %w", err)
-		}
-	default:
-		return fmt.Errorf("unknown perf mode: %v", perf)
+	// 3) perf mode: reset 0x0B/0x13 first, then apply the final state.
+	if err := applyIncaPerfMode(path, flen, perf); err != nil {
+		return err
 	}
 	time.Sleep(lamzuCommandInterval)
 	if resp, e := getFeature(path, 0x00, flen); e == nil {
@@ -596,6 +650,9 @@ func ApplyLamzuSetting(path string, perf PerfMode, poll PollingRate, motionSync 
 	time.Sleep(lamzuCommandInterval)
 	if resp, e := getFeature(path, 0x00, flen); e == nil {
 		dump12("[READ sleep]", resp)
+	}
+	if trajectory != nil {
+		return writeTrajectory(dev, *trajectory)
 	}
 
 	return nil

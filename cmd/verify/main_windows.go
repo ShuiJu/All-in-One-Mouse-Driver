@@ -103,6 +103,16 @@ func main() {
 					}
 				}
 			}
+			if d.Brand == "lamzu" && d.TrajectorySupported {
+				withTrajectory := make([]hub.Parameters, 0, len(cases)*2)
+				for _, p := range cases {
+					for _, trajectory := range []string{"smooth", "stable"} {
+						p.Trajectory = trajectory
+						withTrajectory = append(withTrajectory, p)
+					}
+				}
+				cases = withTrajectory
+			}
 			for _, p := range cases {
 				if err := hw.Apply(d, p); err != nil {
 					results[index].Error = err.Error()

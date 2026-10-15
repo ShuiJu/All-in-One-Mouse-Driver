@@ -164,6 +164,9 @@ func validateParams(brand string, p Parameters) error {
 		if p.Sleep < 0 || p.Sleep > 65535 {
 			return fmt.Errorf("休眠时间须为 0–65535 秒")
 		}
+		if p.Trajectory != "" && p.Trajectory != "smooth" && p.Trajectory != "stable" {
+			return fmt.Errorf("LAMZU 追踪轨迹无效")
+		}
 	} else {
 		if p.Mode != "standard" && p.Mode != "competitive" {
 			return fmt.Errorf("VAXEE 性能模式无效")

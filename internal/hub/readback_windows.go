@@ -73,12 +73,28 @@ func (WindowsHardware) ReadSettings(d Device) (Parameters, error) {
 	}
 	p.MotionSync = ms == 1
 	p.Sleep = int(values[0x87][7])<<8 | int(values[0x87][8])
+	if d.TrajectorySupported {
+		trajectory, err := lamzu.ReadTrajectory(d.l)
+		if err != nil {
+			return p, err
+		}
+		if trajectory == lamzu.TrajSmooth {
+			p.Trajectory = "smooth"
+		} else {
+			p.Trajectory = "stable"
+		}
+	}
 	return p, nil
 }
 func verifyApplied(d Device, want Parameters) error {
 	actual, err := (WindowsHardware{}).ReadSettings(d)
 	if err != nil {
 		return fmt.Errorf("设置已发送，但读回未确认：%w", err)
+	}
+	if d.Brand == "lamzu" && want.Trajectory == "" {
+		// Unspecified profiles leave firmware policy alone; other values still
+		// require exact readback confirmation.
+		actual.Trajectory = ""
 	}
 	if actual != want {
 		return fmt.Errorf("设置读回不一致：期望 %+v，实际 %+v", want, actual)

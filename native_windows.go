@@ -86,6 +86,7 @@ type nativeUI struct {
 	tray                                                                   notifyIcon
 	taskbarMessage                                                         uint32
 	results                                                                chan func()
+	windowProfile                                                          string
 	closeOnce                                                              sync.Once
 }
 
@@ -129,6 +130,7 @@ func newNativeUI(e *hub.Engine, data string) (*nativeUI, error) {
 	if u.hwnd == 0 {
 		return nil, fmt.Errorf("create window: %v", err)
 	}
+	u.updateWindowTitle(u.state)
 	if logoIcon != 0 {
 		winSend.Call(u.hwnd, 0x0080, 0, logoIcon) // WM_SETICON ICON_SMALL
 		winSend.Call(u.hwnd, 0x0080, 1, logoIcon) // WM_SETICON ICON_BIG
@@ -171,6 +173,10 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	u := nativeCurrent
 	if u != nil {
 		switch msg {
+		case 0x001C: // WM_ACTIVATEAPP
+			if wp != 0 {
+				u.engine.RefreshDevices()
+			}
 		case wmInput:
 			if u.recoveryInput && !u.recoveryInputNotified {
 				u.recoveryInputNotified = u.engine.NotifyMouseActivity(rawInputDevicePath(lp))
@@ -275,6 +281,7 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 			next := u.engine.Snapshot()
 			u.syncRecoveryInput(u.engine.NeedsRecovery())
 			u.recoveryInputNotified = false
+			u.updateWindowTitle(next)
 			if u.visible {
 				if err := u.collect(); err != nil {
 					u.dirty = true
@@ -286,12 +293,13 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 				structural := deviceTopologyChanged(u.state.Devices, next.Devices) ||
 					len(u.config.Profiles) != len(next.Config.Profiles) ||
 					len(u.config.Bindings) != len(next.Config.Bindings)
+				trajectorySupported := u.incaTrajectorySupported()
 				u.state = next
 				if !u.dirty {
 					u.config = hub.Clone(next.Config)
 				}
-				// Auto-switch only mutates device status/applied profile; avoid tearing down controls.
-				if structural && u.view == "home" {
+				// Keep capability controls current when a selected device reconnects.
+				if (structural && u.view == "home") || (u.view == "parameters" && trajectorySupported != u.incaTrajectorySupported()) {
 					u.layout()
 				} else {
 					if u.view == "home" {
@@ -365,11 +373,38 @@ func deviceTopologyChanged(old, next []hub.Device) bool {
 		return true
 	}
 	for i := range old {
-		if old[i].ID != next[i].ID || old[i].Name != next[i].Name {
+		if old[i].ID != next[i].ID || old[i].Name != next[i].Name || old[i].MouseModel != next[i].MouseModel || old[i].IdentityCode != next[i].IdentityCode || old[i].IdentityStatus != next[i].IdentityStatus {
 			return true
 		}
 	}
 	return false
+}
+
+func (u *nativeUI) updateWindowTitle(state hub.State) {
+	id := state.Config.Active
+	if state.Config.AutoEnabled {
+		device := hub.Device{Brand: u.brand}
+		for i := range state.Devices {
+			if state.Devices[i].ID == u.selected {
+				device = state.Devices[i]
+				break
+			}
+		}
+		if device.Profile != "" {
+			id = device.Profile
+		} else {
+			_, id = state.Config.Resolve(device, state.Foreground)
+		}
+	}
+	profile, ok := state.Config.Find(id)
+	if !ok {
+		profile, ok = state.Config.Find(state.Config.Active)
+	}
+	if !ok || u.hwnd == 0 || u.windowProfile == profile.Name {
+		return
+	}
+	winSend.Call(u.hwnd, 0x000C, 0, uintptr(unsafe.Pointer(utf(windowTitle()+": "+profile.Name))))
+	u.windowProfile = profile.Name
 }
 func (u *nativeUI) refreshDeviceTabs() {
 	for _, b := range u.buttons {
