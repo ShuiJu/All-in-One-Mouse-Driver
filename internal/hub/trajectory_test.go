@@ -54,9 +54,9 @@ func TestLamzuTrajectorySwitchAndReconnect(t *testing.T) {
 	if len(hw.writes) != writes {
 		t.Fatal("unchanged trajectory triggered another apply")
 	}
-	e.DevicesChanged()
+	e.DeviceRemoved(hw.devices[0].path)
 	e.Tick()
-	if len(hw.writes) != writes+3 || e.Snapshot().Devices[0].Applied.Trajectory != "smooth" {
+	if len(hw.writes) != writes+1 || hw.writes[writes] != "l1" || e.Snapshot().Devices[0].Applied.Trajectory != "smooth" {
 		t.Fatal("same-path reconnect did not restore selected trajectory")
 	}
 	*fg = "notepad.exe"

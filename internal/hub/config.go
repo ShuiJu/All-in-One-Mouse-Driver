@@ -9,11 +9,14 @@ import (
 )
 
 type Parameters struct {
-	Mode       string `json:"mode"`
-	Poll       int    `json:"poll"`
-	MotionSync bool   `json:"motionSync"`
-	Sleep      int    `json:"sleep"`
-	Trajectory string `json:"trajectory"`
+	Mode        string `json:"mode"`
+	Poll        int    `json:"poll"`
+	MotionSync  bool   `json:"motionSync"`
+	Sleep       int    `json:"sleep"`
+	Trajectory  string `json:"trajectory"`
+	LOD         int    `json:"lod,omitempty"`
+	PowerSaving int    `json:"powerSaving,omitempty"`
+	DeepSleep   int    `json:"deepSleep,omitempty"`
 }
 type Profile struct {
 	ID       string                 `json:"id"`
@@ -37,9 +40,30 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{Version: 2, Active: "daily", AutoEnabled: true, IntervalMS: 1000, Bindings: []Binding{}, Profiles: []Profile{
-		{ID: "daily", Name: "日常配置", Settings: map[string]*Parameters{"lamzu": {Mode: "office", Poll: 1000, Sleep: 30}, "vaxee": {Mode: "standard", Poll: 1000, Trajectory: "stable"}}},
-		{ID: "game", Name: "游戏配置", Settings: map[string]*Parameters{"lamzu": {Mode: "20000fps", Poll: 2000, Sleep: 600}, "vaxee": {Mode: "competitive", Poll: 1000, Trajectory: "smooth"}}},
+		{ID: "daily", Name: "日常配置", Settings: map[string]*Parameters{"lamzu": {Mode: "office", Poll: 1000, Sleep: 30}, "vaxee": {Mode: "standard", Poll: 1000, Trajectory: "stable"}, "endgame": defaultEndgameParameters("daily")}},
+		{ID: "game", Name: "游戏配置", Settings: map[string]*Parameters{"lamzu": {Mode: "20000fps", Poll: 2000, Sleep: 600}, "vaxee": {Mode: "competitive", Poll: 1000, Trajectory: "smooth"}, "endgame": defaultEndgameParameters("game")}},
 	}}
+}
+
+func defaultEndgameParameters(profileID string) *Parameters {
+	if profileID == "game" || strings.HasSuffix(profileID, "-game") {
+		return &Parameters{Mode: "competitive", Poll: 4000, LOD: 10, DeepSleep: 3}
+	}
+	return &Parameters{Mode: "standard", Poll: 1000, LOD: 10, PowerSaving: 1, DeepSleep: 2}
+}
+
+// ensureEndgameParameters lets pre-OP1w v2 configurations remain valid. The
+// old format has no Endgame entry, so infer daily/game intent from its ID.
+func ensureEndgameParameters(c *Config) {
+	for i := range c.Profiles {
+		p := &c.Profiles[i]
+		if p.Settings == nil {
+			p.Settings = map[string]*Parameters{}
+		}
+		if p.Settings["endgame"] == nil {
+			p.Settings["endgame"] = defaultEndgameParameters(p.ID)
+		}
+	}
 }
 func NormalizeProcess(s string) string {
 	s = strings.ReplaceAll(strings.TrimSpace(s), `\`, "/")
@@ -154,10 +178,10 @@ func validProcess(s string) bool {
 	return s != "" && strings.HasSuffix(s, ".exe") && !strings.ContainsAny(s, "\r\n\x00")
 }
 func validateParams(brand string, p Parameters) error {
-	if p.Poll != 1000 && p.Poll != 2000 && p.Poll != 4000 && !(brand == "lamzu" && p.Poll == 8000) {
-		return fmt.Errorf("%s 不支持 %d Hz", brand, p.Poll)
-	}
 	if brand == "lamzu" {
+		if p.Poll != 1000 && p.Poll != 2000 && p.Poll != 4000 && p.Poll != 8000 {
+			return fmt.Errorf("%s 不支持 %d Hz", brand, p.Poll)
+		}
 		if p.Mode != "office" && p.Mode != "speed" && p.Mode != "20000fps" {
 			return fmt.Errorf("LAMZU 性能模式无效")
 		}
@@ -167,7 +191,10 @@ func validateParams(brand string, p Parameters) error {
 		if p.Trajectory != "" && p.Trajectory != "smooth" && p.Trajectory != "stable" {
 			return fmt.Errorf("LAMZU 追踪轨迹无效")
 		}
-	} else {
+	} else if brand == "vaxee" {
+		if p.Poll != 1000 && p.Poll != 2000 && p.Poll != 4000 {
+			return fmt.Errorf("%s 不支持 %d Hz", brand, p.Poll)
+		}
 		if p.Mode != "standard" && p.Mode != "competitive" {
 			return fmt.Errorf("VAXEE 性能模式无效")
 		}
@@ -177,9 +204,41 @@ func validateParams(brand string, p Parameters) error {
 		if p.Trajectory != "smooth" && p.Trajectory != "stable" {
 			return fmt.Errorf("追踪轨迹无效")
 		}
+	} else if brand == "endgame" {
+		switch p.Poll {
+		case 125, 1000, 2000, 4000:
+		default:
+			return fmt.Errorf("%s 不支持 %d Hz", brand, p.Poll)
+		}
+		if p.Mode != "standard" && p.Mode != "competitive" {
+			return fmt.Errorf("Endgame 性能模式无效")
+		}
+		if (p.LOD < 7 || p.LOD > 17) && p.LOD != 20 {
+			return fmt.Errorf("Endgame LOD 须为 7–17 或 20")
+		}
+		if p.PowerSaving < 0 || p.PowerSaving > 120 || p.DeepSleep < 0 || p.DeepSleep > 120 {
+			return fmt.Errorf("Endgame 省电和深度休眠须为 0–120 分钟")
+		}
+		if p.Poll != 1000 && p.PowerSaving > 0 {
+			return fmt.Errorf("Endgame 省电仅支持 1000 Hz")
+		}
+	} else {
+		return fmt.Errorf("未知设备品牌 %q", brand)
 	}
 	return nil
 }
+
+// sameParameters compares only settings the selected device family can apply.
+// Endgame firmware has no trajectory or combined sleep setting, and comparing
+// those legacy fields would cause a successful readback to look stale.
+func sameParameters(brand string, a, b Parameters) bool {
+	if brand == "endgame" {
+		return a.Mode == b.Mode && a.Poll == b.Poll && a.MotionSync == b.MotionSync &&
+			a.LOD == b.LOD && a.PowerSaving == b.PowerSaving && a.DeepSleep == b.DeepSleep
+	}
+	return a == b
+}
+
 func (c *Config) Validate() error {
 	if c.DeviceNames == nil {
 		c.DeviceNames = map[string]string{}
@@ -187,6 +246,7 @@ func (c *Config) Validate() error {
 	if c.Version != 2 {
 		return fmt.Errorf("不支持的配置版本")
 	}
+	ensureEndgameParameters(c)
 	if c.IntervalMS < 250 || c.IntervalMS > 10000 {
 		return fmt.Errorf("无效检测间隔")
 	}
@@ -201,12 +261,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("配置名称或编号无效/重复")
 		}
 		seen[p.ID] = true
-		if p.Settings["lamzu"] == nil || p.Settings["vaxee"] == nil {
+		if p.Settings["lamzu"] == nil || p.Settings["vaxee"] == nil || p.Settings["endgame"] == nil {
 			return fmt.Errorf("配置缺少设备参数")
 		}
 		for key, v := range p.Settings {
 			brand := strings.SplitN(key, ":", 2)[0]
-			if (brand != "lamzu" && brand != "vaxee") || v == nil {
+			if (brand != "lamzu" && brand != "vaxee" && brand != "endgame") || v == nil {
 				return fmt.Errorf("未知设备参数")
 			}
 			if err := validateParams(brand, *v); err != nil {
@@ -229,7 +289,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("关联程序无效或重复")
 		}
 		keys[key] = true
-		if b.Brand != "" && b.Brand != "lamzu" && b.Brand != "vaxee" {
+		if b.Brand != "" && b.Brand != "lamzu" && b.Brand != "vaxee" && b.Brand != "endgame" {
 			return fmt.Errorf("关联设备无效")
 		}
 		if b.ProfileID != "" && !seen[b.ProfileID] {

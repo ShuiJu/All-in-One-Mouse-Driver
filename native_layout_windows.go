@@ -65,6 +65,58 @@ func (u *nativeUI) parameters() *hub.Parameters {
 	}
 	return u.profile().EditDevice(*d)
 }
+func applyEndgamePreset(p *hub.Parameters, mode string) {
+	p.Mode = mode
+	p.MotionSync = false
+	if mode == "competitive" {
+		p.Poll = 4000
+		p.PowerSaving = 0
+		p.DeepSleep = 3
+		return
+	}
+	p.Poll = 1000
+	p.PowerSaving = 1
+	p.DeepSleep = 2
+}
+
+var endgameStandardLODOptions = []int{7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+var endgameGlassLODOptions = []int{10, 20}
+
+func (u *nativeUI) endgameLODOptions() []int {
+	if d := u.selectedDevice(); d != nil && d.GlassMode {
+		return endgameGlassLODOptions
+	}
+	return endgameStandardLODOptions
+}
+
+func endgameLODLabel(lod int) string {
+	return fmt.Sprintf("%.1f mm", float64(lod)/10)
+}
+func setEndgamePoll(p *hub.Parameters, poll int) {
+	p.Poll = poll
+	if poll != 1000 {
+		p.PowerSaving = 0
+	}
+}
+func endgameSummary(p hub.Parameters) string {
+	maxFPS := "关闭"
+	if p.Mode == "competitive" {
+		maxFPS = "开启"
+	}
+	powerSaving := "关闭"
+	if p.PowerSaving > 0 {
+		powerSaving = fmt.Sprintf("%d 分钟", p.PowerSaving)
+	}
+	deepSleep := "关闭"
+	if p.DeepSleep > 0 {
+		deepSleep = fmt.Sprintf("%d 分钟", p.DeepSleep)
+	}
+	motion := "关闭"
+	if p.MotionSync {
+		motion = "开启"
+	}
+	return fmt.Sprintf("LOD %s · %d Hz · 最高帧数%s · Motion Sync %s · 省电%s · 深度休眠%s", endgameLODLabel(p.LOD), p.Poll, maxFPS, motion, powerSaving, deepSleep)
+}
 func (u *nativeUI) displayName(d hub.Device) string {
 	if name := u.config.DeviceNames[d.ID]; name != "" {
 		return name
@@ -166,6 +218,24 @@ func (u *nativeUI) collect() error {
 		if u.parameters().Sleep != n {
 			u.parameters().Sleep = n
 			u.dirty = true
+		}
+	}
+	for key, target := range map[string]struct {
+		label string
+		set   func(int)
+	}{
+		"powerSaving": {"Power Saving", func(n int) { u.parameters().PowerSaving = n }},
+		"deepSleep":   {"Deep Sleep", func(n int) { u.parameters().DeepSleep = n }},
+	} {
+		if h := u.edits[key]; h != 0 {
+			n, err := strconv.Atoi(strings.TrimSpace(textOf(h)))
+			if err != nil || n < 0 || n > 120 {
+				return fmt.Errorf("%s 须为 0–120 分钟", target.label)
+			}
+			if (key == "powerSaving" && u.parameters().PowerSaving != n) || (key == "deepSleep" && u.parameters().DeepSleep != n) {
+				target.set(n)
+				u.dirty = true
+			}
 		}
 	}
 	if h := u.edits["name"]; h != 0 {
@@ -285,12 +355,18 @@ func (u *nativeUI) layout() {
 		modes := []struct{ id, name string }{{"office", "办公模式"}, {"speed", "高速模式"}, {"20000fps", "20,000 FPS"}}
 		if u.brand == "vaxee" {
 			modes = []struct{ id, name string }{{"standard", "标准模式"}, {"competitive", "竞技模式"}}
+		} else if u.brand == "endgame" {
+			modes = []struct{ id, name string }{{"standard", "日常模式"}, {"competitive", "竞技模式"}}
 		}
 		w := 1148 / len(modes)
 		for i, m := range modes {
 			mode := m.id
 			u.button(m.name, 66+i*w, 274, w-12, 82, u.parameters().Mode == mode, false, true, func() {
-				u.parameters().Mode = mode
+				if u.brand == "endgame" {
+					applyEndgamePreset(u.parameters(), mode)
+				} else {
+					u.parameters().Mode = mode
+				}
 				if u.brand == "vaxee" && mode == "standard" && u.parameters().Poll > 1000 {
 					u.parameters().Poll = 1000
 				}
@@ -301,41 +377,80 @@ func (u *nativeUI) layout() {
 		rates := []int{1000, 2000, 4000, 8000}
 		if u.brand == "vaxee" {
 			rates = []int{1000, 2000, 4000}
+		} else if u.brand == "endgame" {
+			rates = []int{125, 1000, 2000, 4000}
 		}
 		w = 1148 / len(rates)
 		for i, rate := range rates {
 			r := rate
 			enabled := !(u.brand == "vaxee" && u.parameters().Mode == "standard" && r > 1000)
-			u.button(fmt.Sprintf("%d Hz", r), 66+i*w, 478, w-12, 72, u.parameters().Poll == r, false, enabled, func() { u.parameters().Poll = r; u.dirty = true; u.layout() })
+			u.button(fmt.Sprintf("%d Hz", r), 66+i*w, 478, w-12, 72, u.parameters().Poll == r, false, enabled, func() {
+				if u.brand == "endgame" {
+					setEndgamePoll(u.parameters(), r)
+				} else {
+					u.parameters().Poll = r
+				}
+				u.dirty = true
+				u.layout()
+			})
 		}
 		u.saveButtons()
 	case "parameters":
-		motionY := 380
-		if u.brand == "lamzu" {
-			motionY = 300
-		}
-		u.button("关闭", 60, motionY, 245, 55, !u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = false; u.dirty = true; u.layout() })
-		u.button("开启", 321, motionY, 245, 55, u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = true; u.dirty = true; u.layout() })
-		if u.brand == "lamzu" {
-			for i, option := range []struct{ value, label string }{{"smooth", "顺滑轨迹"}, {"stable", "稳定轨迹"}} {
-				value := option.value
-				u.button(option.label, 60+i*261, 465, 245, 55, u.parameters().Trajectory == value, false, u.incaTrajectorySupported(), func() {
-					if !u.incaTrajectorySupported() {
-						return
-					}
-					u.parameters().Trajectory = value
+		if u.brand == "endgame" {
+			p := u.parameters()
+			u.button("关闭", 60, 300, 245, 55, !p.MotionSync, false, true, func() { p.MotionSync = false; u.dirty = true; u.layout() })
+			u.button("开启", 321, 300, 245, 55, p.MotionSync, false, true, func() { p.MotionSync = true; u.dirty = true; u.layout() })
+			lodValues := u.endgameLODOptions()
+			lodOptions := make([]string, len(lodValues))
+			lodIndex := -1
+			for i, lod := range lodValues {
+				lodOptions[i] = endgameLODLabel(lod)
+				if p.LOD == lod {
+					lodIndex = i
+				}
+			}
+			u.combo(lodOptions, lodIndex, 60, 475, 506, func(i int) {
+				if i >= 0 && i < len(lodValues) {
+					p.LOD = lodValues[i]
 					u.dirty = true
 					u.layout()
-				})
-			}
-			for i, n := range []int{30, 60, 300, 600} {
-				v := n
-				u.button(fmt.Sprintf("%d 秒", n), 672+i*134, 365, 126, 48, u.parameters().Sleep == n, false, true, func() { u.parameters().Sleep = v; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
-			}
-			u.edit("sleep", strconv.Itoa(u.parameters().Sleep), 675, 475, 300, 45, false)
+				}
+			})
+			u.button("关闭", 672, 290, 130, 48, p.PowerSaving == 0, false, true, func() { p.PowerSaving = 0; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+			u.button("1 分钟", 815, 290, 130, 48, p.PowerSaving == 1, false, true, func() { p.PowerSaving = 1; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+			u.edit("powerSaving", strconv.Itoa(p.PowerSaving), 672, 365, 273, 43, false)
+			u.button("关闭", 672, 480, 130, 48, p.DeepSleep == 0, false, true, func() { p.DeepSleep = 0; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+			u.button("2 分钟", 815, 480, 130, 48, p.DeepSleep == 2, false, true, func() { p.DeepSleep = 2; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+			u.button("3 分钟", 958, 480, 130, 48, p.DeepSleep == 3, false, true, func() { p.DeepSleep = 3; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+			u.edit("deepSleep", strconv.Itoa(p.DeepSleep), 672, 555, 416, 43, false)
 		} else {
-			u.button("顺滑灵敏", 672, 380, 255, 55, u.parameters().Trajectory == "smooth", false, true, func() { u.parameters().Trajectory = "smooth"; u.dirty = true; u.layout() })
-			u.button("稳定易控", 943, 380, 255, 55, u.parameters().Trajectory == "stable", false, true, func() { u.parameters().Trajectory = "stable"; u.dirty = true; u.layout() })
+			motionY := 380
+			if u.brand == "lamzu" {
+				motionY = 300
+			}
+			u.button("关闭", 60, motionY, 245, 55, !u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = false; u.dirty = true; u.layout() })
+			u.button("开启", 321, motionY, 245, 55, u.parameters().MotionSync, false, true, func() { u.parameters().MotionSync = true; u.dirty = true; u.layout() })
+			if u.brand == "lamzu" {
+				for i, option := range []struct{ value, label string }{{"smooth", "顺滑轨迹"}, {"stable", "稳定轨迹"}} {
+					value := option.value
+					u.button(option.label, 60+i*261, 465, 245, 55, u.parameters().Trajectory == value, false, u.incaTrajectorySupported(), func() {
+						if !u.incaTrajectorySupported() {
+							return
+						}
+						u.parameters().Trajectory = value
+						u.dirty = true
+						u.layout()
+					})
+				}
+				for i, n := range []int{30, 60, 300, 600} {
+					v := n
+					u.button(fmt.Sprintf("%d 秒", n), 672+i*134, 365, 126, 48, u.parameters().Sleep == n, false, true, func() { u.parameters().Sleep = v; u.dirty = true; u.edits = map[string]uintptr{}; u.layout() })
+				}
+				u.edit("sleep", strconv.Itoa(u.parameters().Sleep), 675, 475, 300, 45, false)
+			} else {
+				u.button("顺滑灵敏", 672, 380, 255, 55, u.parameters().Trajectory == "smooth", false, true, func() { u.parameters().Trajectory = "smooth"; u.dirty = true; u.layout() })
+				u.button("稳定易控", 943, 380, 255, 55, u.parameters().Trajectory == "stable", false, true, func() { u.parameters().Trajectory = "stable"; u.dirty = true; u.layout() })
+			}
 		}
 		u.saveButtons()
 	case "profiles":

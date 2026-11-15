@@ -2,7 +2,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from collections import deque
 import os
 
-root = r'H:\CodeFromGithub\All-in-One-Mouse-Driver'
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 src = os.path.join(root, '鼠标图片')
 out = os.path.join(root, 'assets')
 os.makedirs(os.path.join(out, 'mice'), exist_ok=True)
@@ -125,6 +125,17 @@ inca = cut_pure_white_bg(inca)
 inca = fit_premultiplied(inca)
 inca.save(os.path.join(out, 'mice', 'lamzu-inca.png'), optimize=True)
 print('inca', inca.size)
+
+# The supplied OP1w JPEG has a flat dark studio background. Remove only the
+# connected border colour, retaining the black wheel and gaps inside the mouse.
+op1 = Image.open(os.path.join(src, 'OP1w4Kv2.jpg')).convert('RGBA')
+ImageDraw.floodfill(op1, (0, 0), (0, 0, 0, 0), thresh=20)
+bbox = op1.getbbox()
+if bbox:
+    op1 = op1.crop(bbox)
+op1 = fit_premultiplied(op1)
+op1.save(os.path.join(out, 'mice', 'endgame-op1w4kv2.png'), optimize=True)
+print('op1w 4k v2', op1.size)
 
 for src_name, dst_name in [
     ('vaxee_e1_wireless_blue_1.png', 'vaxee-e1.png'),

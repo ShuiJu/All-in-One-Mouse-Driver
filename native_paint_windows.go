@@ -27,6 +27,18 @@ func (u *nativeUI) titleStatus() string {
 	}
 	return name
 }
+func brandDisplayName(brand string) string {
+	switch brand {
+	case "lamzu":
+		return "LAMZU"
+	case "vaxee":
+		return "VAXEE"
+	case "endgame":
+		return "Endgame Gear"
+	default:
+		return brand
+	}
+}
 func (u *nativeUI) font(size int) uintptr {
 	pixels := int(math.Round(float64(size) * math.Min(float64(u.width)/1280, float64(u.height)/800)))
 	if pixels < 10 {
@@ -151,14 +163,14 @@ func (u *nativeUI) paint(hwnd uintptr) {
 	u.text(mem, u.titleStatus(), 320, 22, 640, 25, 16, 0xc9d3e5, 1)
 
 	conflict := []string{}
-	for _, b := range []string{"lamzu", "vaxee"} {
+	for _, b := range []string{"lamzu", "vaxee", "endgame"} {
 		if u.state.Conflicts[b] {
-			conflict = append(conflict, strings.ToUpper(b))
+			conflict = append(conflict, brandDisplayName(b))
 		}
 	}
 	notice := u.note
 	if len(conflict) > 0 && notice == "" {
-		notice = strings.Join(conflict, " / ") + " 旧版正在运行，设备控制已暂停。请先退出旧版。"
+		notice = strings.Join(conflict, " / ") + " 配置工具正在运行，设备控制已暂停。请先退出对应工具。"
 	}
 	if notice == "" {
 		notice = u.state.Error
@@ -241,6 +253,10 @@ func (u *nativeUI) paintPerformance(dc uintptr) {
 	u.panel(dc, 28, 180, 1224, 450)
 	u.text(dc, "性能模式", 66, 220, 600, 35, 21, 0xe9effa, 0)
 	u.text(dc, "回报率", 66, 420, 600, 35, 21, 0xe9effa, 0)
+	if u.brand == "endgame" {
+		u.text(dc, "竞技模式会强制传感器最高帧数，并采用 4000 Hz 预设。", 66, 365, 900, 25, 13, 0x95a4b9, 0)
+		u.text(dc, endgameSummary(*u.parameters()), 66, 574, 1100, 25, 12, 0x95a4b9, 0)
+	}
 	if u.brand == "vaxee" && u.parameters().Mode == "standard" {
 		u.text(dc, "标准模式最高 1000 Hz", 66, 574, 800, 25, 12, 0x8c9cb3, 0)
 	}
@@ -249,6 +265,20 @@ func (u *nativeUI) paintParameters(dc uintptr) {
 	u.deviceHeading(dc)
 	u.panel(dc, 28, 180, 590, 440)
 	u.panel(dc, 638, 180, 614, 440)
+	if u.brand == "endgame" {
+		u.text(dc, "Motion Sync", 60, 220, 510, 42, 24, 0xedf2fc, 0)
+		u.text(dc, "LOD", 60, 415, 510, 42, 24, 0xedf2fc, 0)
+		lodHint := "普通表面：可选 0.7–1.7 mm"
+		if d := u.selectedDevice(); d != nil && d.GlassMode {
+			lodHint = "Glass Mode：可选 1.0 / 2.0 mm"
+		}
+		u.text(dc, lodHint, 60, 455, 510, 20, 12, 0x95a4b9, 0)
+		u.text(dc, "Power Saving", 672, 220, 520, 42, 24, 0xedf2fc, 0)
+		u.text(dc, "仅 1000 Hz 可用；自定义 0–120 分钟，0 为关闭", 672, 340, 480, 22, 12, 0x95a4b9, 0)
+		u.text(dc, "Deep Sleep", 672, 415, 520, 42, 24, 0xedf2fc, 0)
+		u.text(dc, "自定义（分钟，0 为关闭）", 672, 530, 360, 22, 12, 0x95a4b9, 0)
+		return
+	}
 	motionTitleY := 255
 	if u.brand == "lamzu" {
 		motionTitleY = 220

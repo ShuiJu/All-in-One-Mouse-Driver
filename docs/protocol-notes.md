@@ -52,3 +52,7 @@ LAMZU型号请求使用route2/group0通用CMD81，不是设置组group1的CMD81�
 
 `Device`另提供mouseModel、identityStatus、identityCode及identitySource。current表示观察到有效身份回复，unknown表示有效但型号表未收录，unavailable表示本次无有效身份，cached明确表示同receiver本会话的上一回复，disconnected仅用于有证据的无连接回复。拔除接收器丢弃缓存；有效新原码替换旧身份并使旧设置/电量确认失效；明确无连接时不继续下发自动配置。面板将接收器名称、鼠标型号、识别依据分开展示，未知型号不显示成E1或INCA图片。
 
+
+## Endgame Gear OP1w 4K v2
+
+已新增独立协议层，使用 3367:1984 / 3367:1970 的 FF01:0002 控制集合及主 EXE 的 A1 12 / 14 / 15 协议；内嵌旧 DLL 协议不适用。完整字段、地址、目标 SHA-256 和范围见 [OP1w 4K v2 协议证据](op1w-4k-v2.md)。

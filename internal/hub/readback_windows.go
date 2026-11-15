@@ -2,12 +2,20 @@ package hub
 
 import (
 	"fmt"
+	"mousehub/internal/endgame"
 	"mousehub/internal/lamzu"
 	"mousehub/internal/vaxee"
 )
 
 func (WindowsHardware) ReadSettings(d Device) (Parameters, error) {
 	p := Parameters{}
+	if d.Brand == "endgame" {
+		settings, err := endgame.ReadSettings(d.e)
+		if err != nil {
+			return p, err
+		}
+		return endgameParameters(settings), nil
+	}
 	if d.Brand == "vaxee" {
 		values := map[byte][]byte{}
 		for _, cmd := range []byte{7, 8, 0x13} {
@@ -96,7 +104,7 @@ func verifyApplied(d Device, want Parameters) error {
 		// require exact readback confirmation.
 		actual.Trajectory = ""
 	}
-	if actual != want {
+	if !sameParameters(d.Brand, actual, want) {
 		return fmt.Errorf("设置读回不一致：期望 %+v，实际 %+v", want, actual)
 	}
 	return nil

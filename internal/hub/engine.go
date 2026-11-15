@@ -37,7 +37,7 @@ type Engine struct {
 	wake                   chan struct{}
 	visible                atomic.Bool
 	scanRequested          atomic.Bool
-	topologyChanged        atomic.Bool
+	removedPaths           map[string]bool // Specific removal notifications; guarded by mu.
 	statusRefreshRequested atomic.Bool
 	recoveryPending        atomic.Bool
 	recoveryTargets        map[string]bool
@@ -148,9 +148,22 @@ func (e *Engine) SetVisible(v bool) {
 	}
 }
 func (e *Engine) DevicesChanged() {
-	e.topologyChanged.Store(true)
 	e.scanRequested.Store(true)
 	e.Wake()
+}
+
+// DeviceRemoved retains the removed interface so a coalesced remove/arrival
+// can verify just that receiver instead of invalidating every mouse's cache.
+func (e *Engine) DeviceRemoved(path string) {
+	if path != "" {
+		e.mu.Lock()
+		if e.removedPaths == nil {
+			e.removedPaths = map[string]bool{}
+		}
+		e.removedPaths[path] = true
+		e.mu.Unlock()
+	}
+	e.DevicesChanged()
 }
 
 // RefreshDevices updates observed device state without treating it as a reconnect.
@@ -277,9 +290,6 @@ func (e *Engine) step(force bool) {
 	e.io.Lock()
 	defer e.io.Unlock()
 	e.steps.Add(1)
-	if e.topologyChanged.Swap(false) {
-		e.last = map[string]Parameters{}
-	}
 	proc, fgErr := e.foreground()
 	conflict := e.conflicts()
 	requested := e.scanRequested.Swap(false)
@@ -294,6 +304,8 @@ func (e *Engine) step(force bool) {
 	devices, discoverErr := append([]Device(nil), e.cachedDevices...), e.cachedError
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	removedPaths := e.removedPaths
+	e.removedPaths = nil
 	recoveryActivity := map[string]bool{}
 	for id := range e.recoveryRequested {
 		recoveryActivity[id] = true
@@ -377,8 +389,36 @@ func (e *Engine) step(force bool) {
 		}
 		blocked := activityOnly && !recoveryActivity[d.ID]
 		blocked = blocked || (e.recoveryTargets[d.ID] && !recoveryActivity[d.ID] && !scanNow)
+		if _, applied := e.last[d.ID]; applied && !blocked && !conflict[d.Brand] && discoverErr == nil {
+			for path := range removedPaths {
+				if !recoveryPathMatches(d.path, path) {
+					continue
+				}
+				// A real same-path reconnect may reset firmware. When it kept
+				// the requested values, even this notification needs no Apply.
+				if reader, ok := e.hw.(interface {
+					ReadSettings(Device) (Parameters, error)
+				}); ok {
+					actual, err := reader.ReadSettings(*d)
+					if err != nil {
+						delete(e.last, d.ID)
+						nextTargets[d.ID] = true
+						blocked = true
+						d.Applied = nil
+						old.Applied = nil
+					} else if sameParameters(d.Brand, actual, p) {
+						e.last[d.ID] = p
+					} else {
+						delete(e.last, d.ID)
+					}
+				} else {
+					delete(e.last, d.ID)
+				}
+				break
+			}
+		}
 		if conflict[d.Brand] {
-			d.Status = "旧版程序正在运行，已暂停设备通信"
+			d.Status = "其他配置工具正在运行，已暂停设备通信"
 			delete(e.last, d.ID)
 			delete(e.batteryAt, d.ID)
 			delete(nextTargets, d.ID)
@@ -390,6 +430,13 @@ func (e *Engine) step(force bool) {
 				d.Applied = old.Applied
 			}
 		} else if d.IdentityStatus == IdentityDisconnected {
+			d.Status = "离线"
+			if e.state.Config.AutoEnabled {
+				nextTargets[d.ID] = true
+			}
+		} else if d.Brand == "endgame" && d.IdentityStatus != IdentityCurrent && !recoveryActivity[d.ID] {
+			// OP1w is considered present only after its settings can be read.
+			// Do not send an apply command to an unavailable control interface.
 			d.Status = "离线"
 			if e.state.Config.AutoEnabled {
 				nextTargets[d.ID] = true
@@ -418,7 +465,7 @@ func (e *Engine) step(force bool) {
 			}
 			if e.state.Config.AutoEnabled && fgErr == nil {
 				last, ok := e.last[d.ID]
-				if recoveryActivity[d.ID] || !ok || last != p {
+				if recoveryActivity[d.ID] || !ok || !sameParameters(d.Brand, last, p) {
 					e.writes.Add(1)
 					if err := e.hw.Apply(*d, p); err != nil {
 						nextTargets[d.ID] = true
@@ -431,6 +478,9 @@ func (e *Engine) step(force bool) {
 						e.last[d.ID] = p
 						applied := p
 						d.Applied = &applied
+						if d.Brand == "endgame" {
+							d.IdentityStatus = IdentityCurrent
+						}
 						delete(nextTargets, d.ID)
 						delete(e.recoveryLastNano, d.ID)
 						e.event(fmt.Sprintf("%s → %s · %d Hz", d.Name, kind, p.Poll))
@@ -449,6 +499,10 @@ func (e *Engine) step(force bool) {
 					if err != nil {
 						d.Status = "离线"
 						d.Applied = nil
+						if d.Brand == "endgame" {
+							nextTargets[d.ID] = true
+							delete(e.last, d.ID)
+						}
 						if d.MouseModel != "" {
 							d.IdentityStatus = IdentityCached
 						} else {
@@ -495,6 +549,9 @@ func (e *Engine) ApplyManual(id, kind string) error {
 			continue
 		}
 		if e.conflicts()[d.Brand] {
+			if d.Brand == "endgame" {
+				return fmt.Errorf("请先退出 OP1w 4K v2 官方配置工具")
+			}
 			return fmt.Errorf("请先退出旧版 %s AutoSwitch", d.Brand)
 		}
 		p, ok := e.state.Config.Find(kind)

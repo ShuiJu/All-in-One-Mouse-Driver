@@ -52,8 +52,8 @@ func TestEventLoopCachesDevicesAndSleeps(t *testing.T) {
 	}
 	e.DevicesChanged()
 	await()
-	if e.Counters().DeviceScans != 2 || e.Counters().Writes != 6 {
-		t.Fatal("same-path reconnect failed to reapply")
+	if e.Counters().DeviceScans != 2 || e.Counters().Writes != 3 {
+		t.Fatal("device notification rewrote unchanged devices")
 	}
 }
 

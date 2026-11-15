@@ -118,6 +118,10 @@ func TestV1MigrationPreservesValuesAndWritesBackup(t *testing.T) {
 	if p.Mode != "standard" {
 		t.Fatal("brand-specific migration changed VAXEE association")
 	}
+	endgame := c.Profiles[1].Settings["endgame"]
+	if endgame == nil || *endgame != (Parameters{Mode: "competitive", Poll: 4000, LOD: 10, DeepSleep: 3}) {
+		t.Fatalf("v1 migration lost Endgame game defaults: %+v", endgame)
+	}
 	backup, _ := os.ReadFile(path + ".v1.bak")
 	if string(backup) != old {
 		t.Fatal("backup differs")

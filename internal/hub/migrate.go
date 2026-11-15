@@ -46,7 +46,10 @@ func DecodeConfig(data []byte) (Config, error) {
 			game = "游戏配置"
 		}
 		lD, vD, lG, vG := p.Lamzu.Default, p.Vaxee.Default, p.Lamzu.Game, p.Vaxee.Game
-		c.Profiles = append(c.Profiles, Profile{ID: p.ID + "-daily", Name: daily, Settings: map[string]*Parameters{"lamzu": &lD, "vaxee": &vD}}, Profile{ID: p.ID + "-game", Name: game, Settings: map[string]*Parameters{"lamzu": &lG, "vaxee": &vG}})
+		c.Profiles = append(c.Profiles,
+			Profile{ID: p.ID + "-daily", Name: daily, Settings: map[string]*Parameters{"lamzu": &lD, "vaxee": &vD, "endgame": defaultEndgameParameters(p.ID + "-daily")}},
+			Profile{ID: p.ID + "-game", Name: game, Settings: map[string]*Parameters{"lamzu": &lG, "vaxee": &vG, "endgame": defaultEndgameParameters(p.ID + "-game")}},
+		)
 		if p.ID == old.Active {
 			seen := map[string]bool{}
 			for brand, b := range map[string]legacyBrand{"lamzu": p.Lamzu, "vaxee": p.Vaxee} {

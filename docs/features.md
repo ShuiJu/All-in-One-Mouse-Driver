@@ -63,3 +63,7 @@ INCA 配套固件为 `INCA_Mouse_840_APP_v0.0.0.19_TrajectorySwitch_E1Table_NoDo
 - https://lamzu.net/static/js/index-93e057a1.js （v1.0.32；功能文案与型号能力开关）
 
 Wireshark 与 USBPcap 已安装。本次直接找到了公开查询协议，尚未进行 USB 抓包。
+
+## Endgame Gear OP1w 4K v2
+
+新增 LOD、回报率、强制传感器最高帧数、Motion Sync、独立省电和深度休眠；提供用户指定的日常和竞技预设。支持默认/程序配置、独立设备参数、写入读回和官方工具冲突检测。具体档位、预设与静态协议证据见 [OP1w 4K v2 说明](op1w-4k-v2.md)。当前不代表实物验收完成。

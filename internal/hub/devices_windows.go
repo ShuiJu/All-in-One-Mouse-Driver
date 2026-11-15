@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"mousehub/internal/endgame"
 	"mousehub/internal/lamzu"
 	"mousehub/internal/platform"
 	"mousehub/internal/vaxee"
@@ -26,9 +27,11 @@ type Device struct {
 	IdentityCode        string      `json:"identityCode,omitempty"`
 	IdentitySource      string      `json:"identitySource"`
 	TrajectorySupported bool        `json:"trajectorySupported"`
+	GlassMode           bool        `json:"glassMode,omitempty"`
 	path                string
 	l                   lamzu.LamzuDeviceInfo
 	v                   vaxee.VaxeeDeviceInfo
+	e                   endgame.DeviceInfo
 	serial              string
 }
 type Hardware interface {
@@ -104,6 +107,33 @@ func (WindowsHardware) Discover() ([]Device, error) {
 			out = append(out, device)
 		}
 	}
+	es, err := endgame.EnumerateDevices()
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	for _, d := range es {
+		device := Device{
+			ID:             deviceID("endgame", strings.ToLower(d.Path)),
+			Brand:          "endgame",
+			Name:           "OP1w 4K v2",
+			path:           d.Path,
+			e:              d,
+			serial:         platform.HIDSerial(d.Path),
+			IdentityStatus: IdentityUnavailable,
+			IdentitySource: "未收到有效 OP1w 4K v2 设置读回",
+		}
+		if settings, readErr := endgame.ReadSettings(d); readErr == nil {
+			// ReadSettings confirms the connected mouse's device-info PID, not
+			// merely the receiver's HID PID.
+			device.MousePID = endgame.WiredPID
+			device.MouseModel = "OP1w 4K v2"
+			device.IdentityCode = fmt.Sprintf("PID 0x%04X", endgame.WiredPID)
+			device.IdentityStatus = IdentityCurrent
+			device.IdentitySource = "鼠标设备信息回复中的 PID"
+			device.GlassMode = settings.GlassMode
+		}
+		out = append(out, device)
+	}
 	assignDeviceIDs(out)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	if len(errs) > 0 {
@@ -155,6 +185,12 @@ func (WindowsHardware) Apply(d Device, p Parameters) error {
 		}
 		return verifyApplied(d, p)
 	}
+	if d.Brand == "endgame" {
+		if err := endgame.ApplySettings(d.e, endgameSettings(p)); err != nil {
+			return err
+		}
+		return verifyApplied(d, p)
+	}
 	m := vaxee.PerfStandardMSOff
 	if p.Mode == "competitive" {
 		m = vaxee.PerfCompetitiveMSOff
@@ -177,6 +213,8 @@ func (WindowsHardware) Battery(d Device) (*int, bool) {
 	var ch, ok bool
 	if d.Brand == "lamzu" {
 		p, ch, ok = lamzu.ReadBattery(d.l)
+	} else if d.Brand == "endgame" {
+		p, ch, ok = endgame.ReadBattery(d.e)
 	} else {
 		p, ch, ok = vaxee.ReadBatteryVAXEE(d.v)
 	}
@@ -184,4 +222,30 @@ func (WindowsHardware) Battery(d Device) (*int, bool) {
 		return nil, false
 	}
 	return &p, ch
+}
+
+func endgameSettings(p Parameters) endgame.Settings {
+	return endgame.Settings{
+		Poll:        p.Poll,
+		LOD:         p.LOD,
+		PowerSaving: p.PowerSaving,
+		DeepSleep:   p.DeepSleep,
+		ForceMaxFPS: p.Mode == "competitive",
+		MotionSync:  p.MotionSync,
+	}
+}
+
+func endgameParameters(s endgame.Settings) Parameters {
+	p := Parameters{
+		Mode:        "standard",
+		Poll:        s.Poll,
+		LOD:         s.LOD,
+		PowerSaving: s.PowerSaving,
+		DeepSleep:   s.DeepSleep,
+		MotionSync:  s.MotionSync,
+	}
+	if s.ForceMaxFPS {
+		p.Mode = "competitive"
+	}
+	return p
 }

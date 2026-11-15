@@ -57,7 +57,7 @@ func main() {
 	if qaMode {
 		hardware = readOnlyHardware{}
 	}
-	engine, err := hub.NewEngine(filepath.Join(data, "config.json"), hardware, platform.ForegroundProcessName, platform.LegacyProcesses)
+	engine, err := hub.NewEngine(filepath.Join(data, "config.json"), hardware, platform.ForegroundProcessName, legacyProcesses)
 	if err != nil {
 		message("配置读取失败，原文件已保留：\n" + err.Error())
 		return

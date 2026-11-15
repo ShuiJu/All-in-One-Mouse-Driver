@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"mousehub/internal/endgame"
 	"mousehub/internal/lamzu"
 	"mousehub/internal/vaxee"
 )
@@ -40,6 +41,19 @@ func main() {
 			}
 		}
 		out[identity.Model] = pages
+	}
+	es, err := endgame.EnumerateDevices()
+	if err != nil {
+		out["Endgame Gear"] = err.Error()
+	}
+	for i, d := range es {
+		key := fmt.Sprintf("OP1w 4K v2 #%d", i+1)
+		s, err := endgame.ReadSettings(d)
+		if err != nil {
+			out[key] = err.Error()
+		} else {
+			out[key] = s
+		}
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))

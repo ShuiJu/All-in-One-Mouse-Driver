@@ -77,7 +77,7 @@ func loadPNGAsset(name string) (*rgbaBitmap, error) {
 }
 
 func loadEmbeddedAssets() {
-	for _, key := range []string{"lamzu-inca", "vaxee-e1", "vaxee-np01sv2"} {
+	for _, key := range []string{"lamzu-inca", "vaxee-e1", "vaxee-np01sv2", "endgame-op1w4kv2"} {
 		if bmp, err := loadPNGAsset(key); err == nil {
 			mouseBitmaps[key] = bmp
 		}
@@ -118,6 +118,9 @@ func mouseAssetKey(d *hub.Device) string {
 			return "lamzu-inca"
 		}
 		return ""
+	}
+	if d.Brand == "endgame" && d.MouseModel == "OP1w 4K v2" {
+		return "endgame-op1w4kv2"
 	}
 	if d.Brand != "vaxee" {
 		return ""

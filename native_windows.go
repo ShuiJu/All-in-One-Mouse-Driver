@@ -256,7 +256,9 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 			user32.NewProc("PostQuitMessage").Call(0)
 			return 0
 		case 0x0219:
-			if wp == 0x8000 || wp == 0x8004 || wp == 7 {
+			if wp == 0x8004 {
+				u.engine.DeviceRemoved(deviceNotificationPath(lp))
+			} else if wp == 0x8000 {
 				u.engine.DevicesChanged()
 			}
 			return 0
@@ -318,6 +320,22 @@ func nativeWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	}
 	r, _, _ := user32.NewProc("DefWindowProcW").Call(hwnd, msg, wp, lp)
 	return r
+}
+
+// DEV_BROADCAST_DEVICEINTERFACE_W has a 28-byte fixed header followed by a
+// UTF-16 interface name. Ignore global devnode broadcasts: HID registration
+// already supplies the interface-specific arrival/removal notifications.
+func deviceNotificationPath(lp uintptr) string {
+	if lp == 0 {
+		return ""
+	}
+	header := (*[3]uint32)(unsafe.Pointer(lp))
+	size := header[0]
+	if header[1] != 5 || size < 30 || size > 65536 {
+		return ""
+	}
+	name := unsafe.Slice((*uint16)(unsafe.Pointer(lp+28)), (size-28)/2)
+	return syscall.UTF16ToString(name)
 }
 func (u *nativeUI) run(hidden bool) {
 	if hidden {
